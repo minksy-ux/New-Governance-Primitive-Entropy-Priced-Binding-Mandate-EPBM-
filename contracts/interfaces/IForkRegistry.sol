@@ -15,6 +15,8 @@ interface IForkRegistry {
         address sourceGovernance;
         address governance;
         address branchGovernor;
+        address branchToken;
+        address branchEpbm;
         uint256 treasuryBalance;
         uint256 supportWeight;
         uint256 thresholdWeight;
@@ -42,6 +44,8 @@ interface IForkRegistry {
         address personhoodRegistry,
         address governance,
         uint256 treasuryBalance,
+        address[] calldata forkSupporters,
+        uint256[] calldata forkSupportWeights,
         uint256 supportWeight,
         uint256 thresholdWeight
     ) external returns (uint256 forkId, address branchGovernor);

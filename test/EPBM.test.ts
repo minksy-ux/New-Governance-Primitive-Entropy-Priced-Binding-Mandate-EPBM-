@@ -621,7 +621,14 @@ describe("EPBM", function () {
       expect(fork.branchOwner).to.equal(charlie.address);
       expect(fork.active).to.equal(true);
       expect(fork.governance).to.equal(fork.branchGovernor);
-      expect(await epbm.governance()).to.equal(fork.branchGovernor);
+      expect(fork.branchToken).to.properAddress;
+      expect(fork.branchEpbm).to.properAddress;
+
+      const branchToken = await ethers.getContractAt("GovernanceToken", fork.branchToken) as unknown as GovernanceToken;
+      expect(await branchToken.balanceOf(charlie.address)).to.be.gt(0n);
+
+      const branchEpbm = await ethers.getContractAt("EPBM", fork.branchEpbm) as unknown as EPBM;
+      expect(await branchEpbm.governance()).to.equal(fork.branchGovernor);
     });
 
     it("migrates the treasury into the live branch governor", async function () {
@@ -654,6 +661,9 @@ describe("EPBM", function () {
       expect(await epbm.governance()).to.equal(fork.branchGovernor);
       expect(await ethers.provider.getBalance(fork.branchGovernor)).to.equal(baseBond);
       expect(fork.treasuryBalance).to.equal(baseBond);
+
+      const branchToken = await ethers.getContractAt("GovernanceToken", fork.branchToken) as unknown as GovernanceToken;
+      expect(await branchToken.balanceOf(charlie.address)).to.be.gt(0n);
     });
 
     it("reverts for YES voters", async function () {

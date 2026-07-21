@@ -2,13 +2,16 @@
 pragma solidity ^0.8.24;
 
 import {IEPBM} from "./interfaces/IEPBM.sol";
+import {GovernanceToken} from "./GovernanceToken.sol";
 
 /// @title ForkBranchGovernor
 /// @notice Live control contract for a forked EPBM branch.
 /// @dev This contract becomes the governance address for the forked branch and
 ///      can forward governance actions back into EPBM while holding migrated ETH.
 contract ForkBranchGovernor {
-    IEPBM public immutable epbm;
+    IEPBM public epbm;
+    GovernanceToken public immutable branchToken;
+    address public immutable factory;
     uint256 public immutable forkId;
 
     address public branchOwner;
@@ -29,8 +32,9 @@ contract ForkBranchGovernor {
         _;
     }
 
-    constructor(address _epbm, uint256 _forkId, address _branchOwner) {
-        epbm = IEPBM(_epbm);
+    constructor(address _branchToken, uint256 _forkId, address _branchOwner) {
+        branchToken = GovernanceToken(_branchToken);
+        factory = msg.sender;
         forkId = _forkId;
         branchOwner = _branchOwner;
     }
@@ -39,8 +43,18 @@ contract ForkBranchGovernor {
         treasuryBalance += msg.value;
     }
 
-    /// @notice Finalizes the governance transfer after EPBM sets this contract as pending governor.
-    function bootstrapForkMigration() external {
+    modifier onlyFactory() {
+        if (msg.sender != factory) revert Unauthorized();
+        _;
+    }
+
+    /// @notice Wire the live branch EPBM into this governor after deployment.
+    function setEPBM(address _epbm) external onlyFactory {
+        epbm = IEPBM(_epbm);
+    }
+
+    /// @notice Complete the governance handoff once the branch EPBM is wired.
+    function bootstrapBranchMigration() external onlyFactory {
         epbm.acceptGovernanceTransfer();
     }
 

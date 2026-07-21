@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IForkRegistry} from "./interfaces/IForkRegistry.sol";
+import {EPBM} from "./EPBM.sol";
+import {GovernanceToken} from "./GovernanceToken.sol";
 import {ForkBranchGovernor} from "./ForkBranchGovernor.sol";
+import {IForkRegistry} from "./interfaces/IForkRegistry.sol";
 
 /// @title ForkRegistry
 /// @notice Records concrete EPBM fork branches and their resolution status.
@@ -34,11 +36,44 @@ contract ForkRegistry is IForkRegistry {
         address personhoodRegistry,
         address governance,
         uint256 treasuryBalance,
+        address[] calldata forkSupporters,
+        uint256[] calldata forkSupportWeights,
         uint256 supportWeight,
         uint256 thresholdWeight
     ) external onlyEPBM returns (uint256 forkId, address branchGovernor) {
+        if (forkSupporters.length != forkSupportWeights.length) revert InvalidFork();
+
+        EPBM parent = EPBM(payable(epbm));
         forkId = ++forkCount;
-        branchGovernor = address(new ForkBranchGovernor(epbm, forkId, branchOwner));
+
+        GovernanceToken branchToken = new GovernanceToken("EPBM Fork Token", "fEPBM", address(this));
+        for (uint256 i = 0; i < forkSupporters.length; i++) {
+            branchToken.mint(forkSupporters[i], forkSupportWeights[i]);
+        }
+
+        branchGovernor = address(new ForkBranchGovernor(address(branchToken), forkId, branchOwner));
+
+        EPBM branchEpbm = new EPBM(
+            address(branchToken),
+            personhoodRegistry,
+            address(branchGovernor),
+            parent.baseBond(),
+            parent.bondEntropyFactor(),
+            parent.baseQuorumBPS(),
+            parent.quorumEntropyFactor(),
+            parent.passageThresholdBPS(),
+            parent.passageEntropyFactor(),
+            parent.vetoThresholdBPS(),
+            parent.forkActivationThresholdBPS(),
+            parent.votingPeriod(),
+            parent.executionWindow(),
+            parent.personhoodBoostFactor()
+        );
+
+        branchEpbm.initiateGovernanceTransfer(branchGovernor);
+        ForkBranchGovernor(payable(branchGovernor)).setEPBM(address(branchEpbm));
+        ForkBranchGovernor(payable(branchGovernor)).bootstrapBranchMigration();
+
         _forks[forkId] = ForkBranch({
             forkId: forkId,
             mandateId: mandateId,
@@ -50,6 +85,8 @@ contract ForkRegistry is IForkRegistry {
             sourceGovernance: governance,
             governance: branchGovernor,
             branchGovernor: branchGovernor,
+            branchToken: address(branchToken),
+            branchEpbm: address(branchEpbm),
             treasuryBalance: treasuryBalance,
             supportWeight: supportWeight,
             thresholdWeight: thresholdWeight,

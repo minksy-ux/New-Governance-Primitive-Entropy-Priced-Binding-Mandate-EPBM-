@@ -136,6 +136,7 @@ contract EPBM is IEPBM {
     mapping(uint256 => mapping(address => bool)) private _forkIntents;
     mapping(uint256 => uint256) public forkIntentWeight;
     mapping(uint256 => uint256) public forkIdByMandate;
+    mapping(uint256 => address[]) private _forkSupporters;
 
     error ForkRegistryNotSet();
 
@@ -453,6 +454,7 @@ contract EPBM is IEPBM {
         if (_forkIntents[mandateId][msg.sender]) revert ForkIntentAlreadyRegistered();
 
         _forkIntents[mandateId][msg.sender] = true;
+        _forkSupporters[mandateId].push(msg.sender);
         forkIntentWeight[mandateId] += v.weight;
 
         emit ForkIntentRegistered(mandateId, msg.sender, v.weight);
@@ -473,19 +475,19 @@ contract EPBM is IEPBM {
                 address(personhoodRegistry),
                 governance,
                 forkTreasury,
+                _forkSupporters[mandateId],
+                _forkSupporterWeights(mandateId),
                 forkIntentWeight[mandateId],
                 thresholdWeight
             );
             forkIdByMandate[mandateId] = forkId;
 
-            pendingGovernance = branchGovernor;
+            governance = branchGovernor;
 
             if (forkTreasury > 0) {
                 (bool ok,) = payable(branchGovernor).call{value: forkTreasury}("");
                 require(ok, "Fork treasury transfer failed");
             }
-
-            ForkBranchGovernor(payable(branchGovernor)).bootstrapForkMigration();
 
             _queueBondReturn(m);
             emit MandateForked(mandateId, forkIntentWeight[mandateId], thresholdWeight);
@@ -668,6 +670,14 @@ contract EPBM is IEPBM {
         m.bondAmount = 0;
         claimableBonds[m.proposer] += bond;
         emit BondReturned(m.id, m.proposer, bond);
+    }
+
+    function _forkSupporterWeights(uint256 mandateId) internal view returns (uint256[] memory weights) {
+        address[] storage supporters = _forkSupporters[mandateId];
+        weights = new uint256[](supporters.length);
+        for (uint256 i = 0; i < supporters.length; i++) {
+            weights[i] = _votes[mandateId][supporters[i]].weight;
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
