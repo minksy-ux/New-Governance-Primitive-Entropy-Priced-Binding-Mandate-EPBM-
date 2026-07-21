@@ -87,14 +87,14 @@ async function deployFixture() {
 }
 
 /** Fast-forward past the voting deadline of mandate 1 */
-async function fastForwardPastVoting(epbm: EPBM) {
-  const m = await epbm.getMandate(1n);
+async function fastForwardPastVoting(epbm: EPBM, mandateId: bigint = 1n) {
+  const m = await epbm.getMandate(mandateId);
   await time.increaseTo(Number(m.votingDeadline) + 1);
 }
 
 /** Fast-forward past the execution deadline of mandate 1 */
-async function fastForwardPastExecution(epbm: EPBM) {
-  const m = await epbm.getMandate(1n);
+async function fastForwardPastExecution(epbm: EPBM, mandateId: bigint = 1n) {
+  const m = await epbm.getMandate(mandateId);
   await time.increaseTo(Number(m.executionDeadline) + 1);
 }
 
@@ -682,11 +682,12 @@ describe("EPBM", function () {
       await proposeSimple(epbm, target, alice, baseBond);
       await epbm.connect(alice).castVote(2n, 0);
       await epbm.connect(bob).castVote(2n, 0);
-      await fastForwardPastVoting(epbm);
+      await fastForwardPastVoting(epbm, 2n);
       await epbm.evaluate(2n);
 
       expect(await epbm.slashedBondPool()).to.equal(bondAfterFirst);
-      expect(await epbm.claimableBonds(alice.address)).to.equal(baseBond);
+      expect(await epbm.claimableBonds(alice.address)).to.equal(0n);
+      expect((await epbm.getMandate(2n)).bondAmount).to.equal(baseBond);
     });
 
     it("does not allow claiming the same bond twice", async function () {
