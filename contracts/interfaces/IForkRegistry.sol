@@ -4,6 +4,13 @@ pragma solidity ^0.8.24;
 /// @title IForkRegistry
 /// @notice Interface for tracking concrete minority exit branches created by EPBM.
 interface IForkRegistry {
+    enum BranchState {
+        ACTIVE,
+        FINALIZED,
+        SUPERSEDED,
+        RESOLVED
+    }
+
     struct ForkBranch {
         uint256 forkId;
         uint256 mandateId;
@@ -21,6 +28,10 @@ interface IForkRegistry {
         uint256 supportWeight;
         uint256 thresholdWeight;
         uint256 createdAt;
+        uint256 finalizedAt;
+        uint256 resolvedAt;
+        uint256 supersededBy;
+        BranchState lifecycleState;
         bool active;
     }
 
@@ -34,6 +45,8 @@ interface IForkRegistry {
     );
 
     event ForkResolved(uint256 indexed forkId, bool active);
+    event ForkFinalized(uint256 indexed forkId);
+    event ForkSuperseded(uint256 indexed forkId, uint256 indexed supersedingForkId);
 
     function createFork(
         uint256 mandateId,
@@ -51,6 +64,10 @@ interface IForkRegistry {
     ) external returns (uint256 forkId, address branchGovernor);
 
     function resolveFork(uint256 forkId, bool active) external;
+
+    function finalizeFork(uint256 forkId) external;
+
+    function supersedeFork(uint256 forkId, uint256 supersedingForkId) external;
 
     function getFork(uint256 forkId) external view returns (ForkBranch memory);
 }

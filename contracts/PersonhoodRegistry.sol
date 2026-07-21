@@ -21,26 +21,33 @@ contract PersonhoodRegistry is IPersonhoodRegistry {
 
     address public admin;
     address public pendingAdmin;
+    address public verifier;
 
     /// @dev Score per account in [0, 100].  Unset accounts return 0.
     mapping(address => uint256) private _scores;
+    mapping(bytes32 => bool) public usedAttestations;
 
     // ─── Events ───────────────────────────────────────────────────────────────
 
     event ScoreSet(address indexed account, uint256 score);
+    event ScoreAttested(address indexed account, uint256 score, uint256 nonce);
     event AdminTransferInitiated(address indexed newAdmin);
     event AdminTransferAccepted(address indexed newAdmin);
+    event VerifierUpdated(address indexed verifier);
 
     // ─── Errors ───────────────────────────────────────────────────────────────
 
     error Unauthorized();
     error ScoreOutOfRange(uint256 score);
     error NoPendingTransfer();
+    error InvalidAttestation();
+    error AttestationExpired(uint256 expiry);
 
     // ─── Constructor ──────────────────────────────────────────────────────────
 
     constructor(address _admin) {
         admin = _admin;
+        verifier = _admin;
     }
 
     // ─── Modifiers ────────────────────────────────────────────────────────────
@@ -74,6 +81,38 @@ contract PersonhoodRegistry is IPersonhoodRegistry {
         }
     }
 
+    /// @notice Update verifier key used to attest personhood scores.
+    function setVerifier(address newVerifier) external onlyAdmin {
+        verifier = newVerifier;
+        emit VerifierUpdated(newVerifier);
+    }
+
+    /// @notice Set score with an off-chain verifier attestation.
+    function setScoreByAttestation(
+        address account,
+        uint256 score,
+        uint256 expiry,
+        uint256 nonce,
+        bytes calldata signature
+    ) external {
+        if (score > 100) revert ScoreOutOfRange(score);
+        if (block.timestamp > expiry) revert AttestationExpired(expiry);
+
+        bytes32 payloadHash = keccak256(
+            abi.encodePacked(address(this), block.chainid, account, score, expiry, nonce)
+        );
+        bytes32 digest = _toEthSignedMessageHash(payloadHash);
+        if (usedAttestations[digest]) revert InvalidAttestation();
+
+        address signer = _recoverSigner(digest, signature);
+        if (signer != verifier) revert InvalidAttestation();
+
+        usedAttestations[digest] = true;
+        _scores[account] = score;
+        emit ScoreSet(account, score);
+        emit ScoreAttested(account, score, nonce);
+    }
+
     // ─── Two-step admin transfer ───────────────────────────────────────────────
 
     function initiateAdminTransfer(address newAdmin) external onlyAdmin {
@@ -93,5 +132,29 @@ contract PersonhoodRegistry is IPersonhoodRegistry {
     /// @inheritdoc IPersonhoodRegistry
     function scoreOf(address account) external view returns (uint256) {
         return _scores[account];
+    }
+
+    function _toEthSignedMessageHash(bytes32 hash) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", hash));
+    }
+
+    function _recoverSigner(bytes32 digest, bytes calldata signature) internal pure returns (address) {
+        if (signature.length != 65) revert InvalidAttestation();
+
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := calldataload(signature.offset)
+            s := calldataload(add(signature.offset, 32))
+            v := byte(0, calldataload(add(signature.offset, 64)))
+        }
+
+        if (v < 27) v += 27;
+        if (v != 27 && v != 28) revert InvalidAttestation();
+
+        address signer = ecrecover(digest, v, r, s);
+        if (signer == address(0)) revert InvalidAttestation();
+        return signer;
     }
 }

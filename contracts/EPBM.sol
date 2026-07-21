@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import {IEPBM}                from "./interfaces/IEPBM.sol";
 import {IForkRegistry}        from "./interfaces/IForkRegistry.sol";
 import {ForkBranchGovernor}   from "./ForkBranchGovernor.sol";
+import {IERC20Minimal}        from "./interfaces/IERC20Minimal.sol";
 import {IVotes}               from "./interfaces/IVotes.sol";
 import {IPersonhoodRegistry}  from "./interfaces/IPersonhoodRegistry.sol";
 import {EntropyLib}           from "./libraries/EntropyLib.sol";
@@ -121,6 +122,10 @@ contract EPBM is IEPBM {
     ///         In production, set this to address(this) and route changes through mandates.
     address public governance;
     address public pendingGovernance;
+    uint256 public pendingGovernanceEta;
+    uint256 public pendingGovernanceNonce;
+    uint256 public governanceTransferNonce;
+    uint256 public governanceTransferDelay;
 
     /// @notice Allowed execution targets per scope.
     mapping(bytes32 => mapping(address => bool)) public scopeTargetAllowed;
@@ -138,7 +143,14 @@ contract EPBM is IEPBM {
     mapping(uint256 => uint256) public forkIdByMandate;
     mapping(uint256 => address[]) private _forkSupporters;
 
+    address[] private _treasuryAssets;
+    mapping(address => bool) public isTreasuryAsset;
+
     error ForkRegistryNotSet();
+    error GovernanceTransferTimelockActive(uint256 eta);
+    error GovernanceTransferPending(address pendingGovernance);
+    error TreasuryAssetAlreadyRegistered(address asset);
+    error TreasuryAssetTransferFailed(address asset, uint256 amount);
 
     // ─────────────────────────────────────────────────────────────────────────
     // Entropy history ring-buffer
@@ -192,6 +204,7 @@ contract EPBM is IEPBM {
         uint256 _personhoodBoostFactor
     ) {
         governance            = msg.sender;
+        governanceTransferDelay = 0;
         token                 = IVotes(_token);
         personhoodRegistry    = IPersonhoodRegistry(_personhoodRegistry);
         forkRegistry          = IForkRegistry(_forkRegistry);
@@ -483,10 +496,21 @@ contract EPBM is IEPBM {
             forkIdByMandate[mandateId] = forkId;
 
             governance = branchGovernor;
+            pendingGovernance = address(0);
+            pendingGovernanceEta = 0;
+            pendingGovernanceNonce = 0;
 
             if (forkTreasury > 0) {
                 (bool ok,) = payable(branchGovernor).call{value: forkTreasury}("");
                 require(ok, "Fork treasury transfer failed");
+            }
+
+            for (uint256 i = 0; i < _treasuryAssets.length; i++) {
+                address asset = _treasuryAssets[i];
+                uint256 balance = IERC20Minimal(asset).balanceOf(address(this));
+                if (balance == 0) continue;
+                bool ok = IERC20Minimal(asset).transfer(branchGovernor, balance);
+                if (!ok) revert TreasuryAssetTransferFailed(asset, balance);
             }
 
             _queueBondReturn(m);
@@ -518,6 +542,28 @@ contract EPBM is IEPBM {
         forkRegistry = IForkRegistry(_forkRegistry);
     }
 
+    /// @notice Register a treasury ERC20 asset that should migrate on fork.
+    function registerTreasuryAsset(address asset) external onlyGovernance {
+        if (isTreasuryAsset[asset]) revert TreasuryAssetAlreadyRegistered(asset);
+        isTreasuryAsset[asset] = true;
+        _treasuryAssets.push(asset);
+    }
+
+    /// @notice Mark a fork branch finalized.
+    function finalizeForkBranch(uint256 forkId) external onlyGovernance {
+        forkRegistry.finalizeFork(forkId);
+    }
+
+    /// @notice Supersede a fork branch by a newer branch.
+    function supersedeForkBranch(uint256 forkId, uint256 supersedingForkId) external onlyGovernance {
+        forkRegistry.supersedeFork(forkId, supersedingForkId);
+    }
+
+    /// @notice Resolve a fork branch state and active flag.
+    function resolveForkBranch(uint256 forkId, bool active) external onlyGovernance {
+        forkRegistry.resolveFork(forkId, active);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Governance: treasury withdrawal + config update
     // ─────────────────────────────────────────────────────────────────────────
@@ -529,14 +575,25 @@ contract EPBM is IEPBM {
 
     /// @notice Two-step governance transfer — initiate phase.
     function initiateGovernanceTransfer(address newGovernance) external onlyGovernance {
+        if (pendingGovernance != address(0)) revert GovernanceTransferPending(pendingGovernance);
         pendingGovernance = newGovernance;
+        pendingGovernanceEta = block.timestamp + governanceTransferDelay;
+        pendingGovernanceNonce = ++governanceTransferNonce;
     }
 
     /// @notice Two-step governance transfer — accept phase.
     function acceptGovernanceTransfer() external {
+        if (block.timestamp < pendingGovernanceEta) revert GovernanceTransferTimelockActive(pendingGovernanceEta);
         require(msg.sender == pendingGovernance, "Not pending governance");
         governance = pendingGovernance;
         pendingGovernance = address(0);
+        pendingGovernanceEta = 0;
+        pendingGovernanceNonce = 0;
+    }
+
+    /// @notice Configure governance handoff delay.
+    function setGovernanceTransferDelay(uint256 delaySeconds) external onlyGovernance {
+        governanceTransferDelay = delaySeconds;
     }
 
     /// @notice Withdraw accumulated slashed bonds to a treasury address.
@@ -595,6 +652,10 @@ contract EPBM is IEPBM {
     /// @inheritdoc IEPBM
     function getVote(uint256 mandateId, address voter) external view returns (VoteRecord memory) {
         return _votes[mandateId][voter];
+    }
+
+    function treasuryAssets() external view returns (address[] memory) {
+        return _treasuryAssets;
     }
 
     /// @inheritdoc IEPBM

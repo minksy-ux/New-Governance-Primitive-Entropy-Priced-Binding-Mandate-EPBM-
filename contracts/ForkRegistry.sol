@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {EPBM} from "./EPBM.sol";
 import {GovernanceToken} from "./GovernanceToken.sol";
 import {ForkBranchGovernor} from "./ForkBranchGovernor.sol";
 import {IForkRegistry} from "./interfaces/IForkRegistry.sol";
@@ -43,7 +42,6 @@ contract ForkRegistry is IForkRegistry {
     ) external onlyEPBM returns (uint256 forkId, address branchGovernor) {
         if (forkSupporters.length != forkSupportWeights.length) revert InvalidFork();
 
-        EPBM parent = EPBM(payable(epbm));
         forkId = ++forkCount;
 
         GovernanceToken branchToken = new GovernanceToken("EPBM Fork Token", "fEPBM", address(this));
@@ -52,27 +50,7 @@ contract ForkRegistry is IForkRegistry {
         }
 
         branchGovernor = address(new ForkBranchGovernor(address(branchToken), forkId, branchOwner));
-
-        EPBM branchEpbm = new EPBM(
-            address(branchToken),
-            personhoodRegistry,
-            address(branchGovernor),
-            parent.baseBond(),
-            parent.bondEntropyFactor(),
-            parent.baseQuorumBPS(),
-            parent.quorumEntropyFactor(),
-            parent.passageThresholdBPS(),
-            parent.passageEntropyFactor(),
-            parent.vetoThresholdBPS(),
-            parent.forkActivationThresholdBPS(),
-            parent.votingPeriod(),
-            parent.executionWindow(),
-            parent.personhoodBoostFactor()
-        );
-
-        branchEpbm.initiateGovernanceTransfer(branchGovernor);
-        ForkBranchGovernor(payable(branchGovernor)).setEPBM(address(branchEpbm));
-        ForkBranchGovernor(payable(branchGovernor)).bootstrapBranchMigration();
+        ForkBranchGovernor(payable(branchGovernor)).setEPBM(epbm);
 
         _forks[forkId] = ForkBranch({
             forkId: forkId,
@@ -86,11 +64,15 @@ contract ForkRegistry is IForkRegistry {
             governance: branchGovernor,
             branchGovernor: branchGovernor,
             branchToken: address(branchToken),
-            branchEpbm: address(branchEpbm),
+            branchEpbm: epbm,
             treasuryBalance: treasuryBalance,
             supportWeight: supportWeight,
             thresholdWeight: thresholdWeight,
             createdAt: block.timestamp,
+            finalizedAt: 0,
+            resolvedAt: 0,
+            supersededBy: 0,
+            lifecycleState: BranchState.ACTIVE,
             active: true
         });
 
@@ -101,7 +83,34 @@ contract ForkRegistry is IForkRegistry {
         ForkBranch storage fork = _forks[forkId];
         if (fork.forkId == 0) revert InvalidFork();
         fork.active = active;
+        fork.resolvedAt = block.timestamp;
+        fork.lifecycleState = BranchState.RESOLVED;
         emit ForkResolved(forkId, active);
+    }
+
+    function finalizeFork(uint256 forkId) external onlyEPBM {
+        ForkBranch storage fork = _forks[forkId];
+        if (fork.forkId == 0 || fork.lifecycleState != BranchState.ACTIVE) revert InvalidFork();
+        fork.lifecycleState = BranchState.FINALIZED;
+        fork.finalizedAt = block.timestamp;
+        emit ForkFinalized(forkId);
+    }
+
+    function supersedeFork(uint256 forkId, uint256 supersedingForkId) external onlyEPBM {
+        ForkBranch storage fork = _forks[forkId];
+        ForkBranch storage supersedingFork = _forks[supersedingForkId];
+        if (
+            fork.forkId == 0
+                || supersedingFork.forkId == 0
+                || fork.lifecycleState == BranchState.SUPERSEDED
+                || forkId == supersedingForkId
+        ) {
+            revert InvalidFork();
+        }
+        fork.lifecycleState = BranchState.SUPERSEDED;
+        fork.supersededBy = supersedingForkId;
+        fork.active = false;
+        emit ForkSuperseded(forkId, supersedingForkId);
     }
 
     function getFork(uint256 forkId) external view returns (ForkBranch memory) {

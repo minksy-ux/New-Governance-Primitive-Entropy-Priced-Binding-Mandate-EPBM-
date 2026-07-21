@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
-import type { EPBM, PersonhoodRegistry, GovernanceToken, MockTarget, ForkRegistry } from "../typechain-types";
+import type { EPBM, PersonhoodRegistry, GovernanceToken, MockTarget, ForkRegistry, MockERC20 } from "../typechain-types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -17,6 +17,24 @@ function descHash(s: string) {
 
 function scopeId(s: string) {
   return ethers.keccak256(ethers.toUtf8Bytes(s));
+}
+
+async function signPersonhoodAttestation(
+  registryAddress: string,
+  chainId: bigint,
+  signer: Awaited<ReturnType<typeof ethers.getSigner>>,
+  account: string,
+  score: number,
+  expiry: bigint,
+  nonce: bigint,
+) {
+  const payloadHash = ethers.keccak256(
+    ethers.solidityPacked(
+      ["address", "uint256", "address", "uint256", "uint256", "uint256"],
+      [registryAddress, chainId, account, BigInt(score), expiry, nonce],
+    ),
+  );
+  return signer.signMessage(ethers.getBytes(payloadHash));
 }
 
 // ─── Fixture ──────────────────────────────────────────────────────────────────
@@ -620,15 +638,15 @@ describe("EPBM", function () {
       expect(fork.proposer).to.equal(alice.address);
       expect(fork.branchOwner).to.equal(charlie.address);
       expect(fork.active).to.equal(true);
+      expect(fork.lifecycleState).to.equal(0n); // ACTIVE
       expect(fork.governance).to.equal(fork.branchGovernor);
       expect(fork.branchToken).to.properAddress;
       expect(fork.branchEpbm).to.properAddress;
+      expect(fork.branchEpbm).to.equal(epbm.target as string);
 
       const branchToken = await ethers.getContractAt("GovernanceToken", fork.branchToken) as unknown as GovernanceToken;
       expect(await branchToken.balanceOf(charlie.address)).to.be.gt(0n);
-
-      const branchEpbm = await ethers.getContractAt("EPBM", fork.branchEpbm) as unknown as EPBM;
-      expect(await branchEpbm.governance()).to.equal(fork.branchGovernor);
+      expect(await epbm.governance()).to.equal(fork.branchGovernor);
     });
 
     it("migrates the treasury into the live branch governor", async function () {
@@ -664,6 +682,55 @@ describe("EPBM", function () {
 
       const branchToken = await ethers.getContractAt("GovernanceToken", fork.branchToken) as unknown as GovernanceToken;
       expect(await branchToken.balanceOf(charlie.address)).to.be.gt(0n);
+    });
+
+    it("migrates registered ERC20 treasury assets to the branch governor", async function () {
+      const { epbm, forkRegistry, target, owner, alice, bob, charlie, baseBond } = await deployFixture();
+
+      const Asset = await ethers.getContractFactory("MockERC20");
+      const asset = (await Asset.deploy()) as unknown as MockERC20;
+      await asset.mint(epbm.target as string, ethers.parseEther("50"));
+
+      await epbm.connect(owner).registerTreasuryAsset(asset.target as string);
+
+      await proposeSimple(epbm, target, alice, baseBond);
+      await epbm.connect(alice).castVote(1n, 0);
+      await epbm.connect(bob).castVote(1n, 0);
+      await epbm.connect(charlie).castVote(1n, 1);
+      await fastForwardPastVoting(epbm);
+      await epbm.evaluate(1n);
+      await epbm.connect(charlie).registerForkIntent(1n);
+
+      const forkId = await epbm.forkIdByMandate(1n);
+      const fork = await forkRegistry.getFork(forkId);
+
+      expect(await asset.balanceOf(epbm.target as string)).to.equal(0n);
+      expect(await asset.balanceOf(fork.branchGovernor)).to.equal(ethers.parseEther("50"));
+    });
+
+    it("supports fork lifecycle transitions finalize and resolve", async function () {
+      const { epbm, forkRegistry, target, alice, bob, charlie, baseBond } = await deployFixture();
+
+      await proposeSimple(epbm, target, alice, baseBond);
+      await epbm.connect(alice).castVote(1n, 0);
+      await epbm.connect(bob).castVote(1n, 0);
+      await epbm.connect(charlie).castVote(1n, 1);
+      await fastForwardPastVoting(epbm);
+      await epbm.evaluate(1n);
+      await epbm.connect(charlie).registerForkIntent(1n);
+
+      const forkId = await epbm.forkIdByMandate(1n);
+      const fork = await forkRegistry.getFork(forkId);
+      const governor = await ethers.getContractAt("ForkBranchGovernor", fork.branchGovernor);
+
+      await governor.connect(charlie).finalizeForkBranch(forkId);
+      let updatedFork = await forkRegistry.getFork(forkId);
+      expect(updatedFork.lifecycleState).to.equal(1n); // FINALIZED
+
+      await governor.connect(charlie).resolveForkBranch(forkId, false);
+      updatedFork = await forkRegistry.getFork(forkId);
+      expect(updatedFork.lifecycleState).to.equal(3n); // RESOLVED
+      expect(updatedFork.active).to.equal(false);
     });
 
     it("reverts for YES voters", async function () {
@@ -833,6 +900,22 @@ describe("EPBM", function () {
     });
   });
 
+  describe("governance transfer safeguards", function () {
+    it("enforces governance transfer delay before acceptance", async function () {
+      const { epbm, owner, alice } = await deployFixture();
+
+      await epbm.connect(owner).setGovernanceTransferDelay(DAY);
+      await epbm.connect(owner).initiateGovernanceTransfer(alice.address);
+
+      await expect(epbm.connect(alice).acceptGovernanceTransfer())
+        .to.be.revertedWithCustomError(epbm, "GovernanceTransferTimelockActive");
+
+      await time.increase(Number(DAY) + 1);
+      await epbm.connect(alice).acceptGovernanceTransfer();
+      expect(await epbm.governance()).to.equal(alice.address);
+    });
+  });
+
   // ── PersonhoodRegistry ───────────────────────────────────────────────────
 
   describe("PersonhoodRegistry", function () {
@@ -878,6 +961,30 @@ describe("EPBM", function () {
 
       await registry.connect(alice).acceptAdminTransfer();
       expect(await registry.admin()).to.equal(alice.address);
+    });
+
+    it("accepts verifier-signed personhood attestations with replay protection", async function () {
+      const { registry, owner, bob } = await deployFixture();
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+
+      const expiry = BigInt((await time.latest()) + 3600);
+      const nonce = 1n;
+      const signature = await signPersonhoodAttestation(
+        registry.target as string,
+        chainId,
+        owner,
+        bob.address,
+        88,
+        expiry,
+        nonce,
+      );
+
+      await registry.setScoreByAttestation(bob.address, 88, expiry, nonce, signature);
+      expect(await registry.scoreOf(bob.address)).to.equal(88n);
+
+      await expect(
+        registry.setScoreByAttestation(bob.address, 88, expiry, nonce, signature),
+      ).to.be.revertedWithCustomError(registry, "InvalidAttestation");
     });
   });
 });

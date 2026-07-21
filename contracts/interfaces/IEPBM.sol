@@ -167,6 +167,18 @@ interface IEPBM {
     /// @notice Set or update the fork registry.
     function setForkRegistry(address _forkRegistry) external;
 
+    /// @notice Register a treasury ERC20 asset for fork migration.
+    function registerTreasuryAsset(address asset) external;
+
+    /// @notice Configure governance transfer delay.
+    function setGovernanceTransferDelay(uint256 delaySeconds) external;
+
+    function finalizeForkBranch(uint256 forkId) external;
+
+    function supersedeForkBranch(uint256 forkId, uint256 supersedingForkId) external;
+
+    function resolveForkBranch(uint256 forkId, bool active) external;
+
     /// @notice Allow or disallow a target for a given scope.
     function setScopeTarget(bytes32 scope, address target, bool allowed) external;
 

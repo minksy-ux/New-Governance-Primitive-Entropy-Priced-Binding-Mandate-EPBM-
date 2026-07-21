@@ -22,6 +22,8 @@ contract ForkBranchGovernor {
     event BranchOwnershipTransferInitiated(address indexed newOwner);
     event BranchOwnershipTransferred(address indexed newOwner);
     event TreasuryWithdrawn(address indexed to, uint256 amount);
+    event BranchTokenMinted(address indexed to, uint256 amount);
+    event BranchTokenBurned(address indexed from, uint256 amount);
 
     error Unauthorized();
     error NoPendingTransfer();
@@ -72,6 +74,39 @@ contract ForkBranchGovernor {
 
     function setScopeTarget(bytes32 scope, address target, bool allowed) external onlyBranchOwner {
         epbm.setScopeTarget(scope, target, allowed);
+    }
+
+    /// @notice Mint branch token supply for migration corrections or branch incentives.
+    function mintBranchToken(address to, uint256 amount) external onlyBranchOwner {
+        branchToken.mint(to, amount);
+        emit BranchTokenMinted(to, amount);
+    }
+
+    /// @notice Burn branch token supply from an account.
+    function burnBranchToken(address from, uint256 amount) external onlyBranchOwner {
+        branchToken.burn(from, amount);
+        emit BranchTokenBurned(from, amount);
+    }
+
+    /// @notice Transfer branch EPBM governance to a successor controller.
+    function rotateBranchGovernance(address newGovernance) external onlyBranchOwner {
+        epbm.initiateGovernanceTransfer(newGovernance);
+    }
+
+    function setBranchGovernanceTransferDelay(uint256 delaySeconds) external onlyBranchOwner {
+        epbm.setGovernanceTransferDelay(delaySeconds);
+    }
+
+    function finalizeForkBranch(uint256 targetForkId) external onlyBranchOwner {
+        epbm.finalizeForkBranch(targetForkId);
+    }
+
+    function supersedeForkBranch(uint256 targetForkId, uint256 supersedingForkId) external onlyBranchOwner {
+        epbm.supersedeForkBranch(targetForkId, supersedingForkId);
+    }
+
+    function resolveForkBranch(uint256 targetForkId, bool active) external onlyBranchOwner {
+        epbm.resolveForkBranch(targetForkId, active);
     }
 
     function updateConfig(
