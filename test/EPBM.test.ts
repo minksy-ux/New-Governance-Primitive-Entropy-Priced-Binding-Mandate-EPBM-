@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
-import type { EPBM, PersonhoodRegistry, MockVotes, MockTarget } from "../typechain-types";
+import type { EPBM, PersonhoodRegistry, GovernanceToken, MockTarget, ForkRegistry } from "../typechain-types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -24,9 +24,9 @@ function scopeId(s: string) {
 async function deployFixture() {
   const [owner, alice, bob, charlie, stranger] = await ethers.getSigners();
 
-  // 1. Governance token (mock, no real checkpointing)
-  const Token = await ethers.getContractFactory("MockVotes");
-  const token = (await Token.deploy()) as unknown as MockVotes;
+  // 1. Governance token (transferable, checkpointed vote weights)
+  const Token = await ethers.getContractFactory("GovernanceToken");
+  const token = (await Token.deploy("EPBM Governance Token", "EPBM", owner.address)) as unknown as GovernanceToken;
 
   // 2. Personhood registry
   const Registry = await ethers.getContractFactory("PersonhoodRegistry");
@@ -41,6 +41,7 @@ async function deployFixture() {
   //      passageThresholdBPS   = 5000   (50%)
   //      passageEntropyFactor  = 1000   (+10% BPS at max entropy)
   //      vetoThresholdBPS      = 2000   (20% of eligible = veto)
+  //      forkActivationThresholdBPS = 1000 (10% of eligible can activate fork)
   //      votingPeriod          = 7 days
   //      executionWindow       = 2 days
   //      personhoodBoostFactor = 1 WAD  (100% boost for score=100)
@@ -48,6 +49,7 @@ async function deployFixture() {
   const epbm = (await EPBM.deploy(
     token.target,
     registry.target,
+    ethers.ZeroAddress,
     ethers.parseEther("0.1"),  // baseBond
     2n * WAD,                  // bondEntropyFactor
     1000n,                     // baseQuorumBPS
@@ -55,10 +57,15 @@ async function deployFixture() {
     5000n,                     // passageThresholdBPS
     1000n,                     // passageEntropyFactor
     2000n,                     // vetoThresholdBPS
+    1000n,                     // forkActivationThresholdBPS
     WEEK,                      // votingPeriod
     2n * DAY,                  // executionWindow
     WAD,                       // personhoodBoostFactor
   )) as unknown as EPBM;
+
+  const ForkRegistry = await ethers.getContractFactory("ForkRegistry");
+  const forkRegistry = (await ForkRegistry.deploy(epbm.target)) as unknown as ForkRegistry;
+  await epbm.setForkRegistry(forkRegistry.target);
 
   // 4. Mock execution target
   const Target = await ethers.getContractFactory("MockTarget");
@@ -83,7 +90,7 @@ async function deployFixture() {
 
   const baseBond = ethers.parseEther("0.1");
 
-  return { epbm, token, registry, target, auxTarget, owner, alice, bob, charlie, stranger, baseBond };
+  return { epbm, forkRegistry, token, registry, target, auxTarget, owner, alice, bob, charlie, stranger, baseBond };
 }
 
 /** Fast-forward past the voting deadline of mandate 1 */
@@ -580,13 +587,13 @@ describe("EPBM", function () {
   // ── Minority fork rights ─────────────────────────────────────────────────
 
   describe("registerForkIntent()", function () {
-    it("allows NO voters to register fork intent after passage", async function () {
-      const { epbm, target, alice, bob, charlie, baseBond } = await deployFixture();
+    it("activates a fork and blocks execution once minority support crosses threshold", async function () {
+      const { epbm, forkRegistry, target, alice, bob, charlie, baseBond } = await deployFixture();
 
       await proposeSimple(epbm, target, alice, baseBond);
-      await epbm.connect(alice).castVote(1n, 0); // YES (wins)
+      await epbm.connect(alice).castVote(1n, 0); // YES
       await epbm.connect(bob).castVote(1n, 0);   // YES
-      await epbm.connect(charlie).castVote(1n, 1); // NO (minority)
+      await epbm.connect(charlie).castVote(1n, 1); // NO minority large enough to fork
 
       await fastForwardPastVoting(epbm);
       await epbm.evaluate(1n);
@@ -594,6 +601,59 @@ describe("EPBM", function () {
       await expect(epbm.connect(charlie).registerForkIntent(1n))
         .to.emit(epbm, "ForkIntentRegistered")
         .withArgs(1n, charlie.address, (w: bigint) => w > 0n);
+
+      await expect(epbm.connect(alice).registerForkIntent(1n))
+        .to.be.revertedWithCustomError(epbm, "InvalidMandateState");
+
+      await expect(epbm.connect(bob).execute(1n, { value: 0n }))
+        .to.be.revertedWithCustomError(epbm, "InvalidMandateState");
+
+      const m = await epbm.getMandate(1n);
+      expect(m.state).to.equal(7n); // FORKED
+      expect(await epbm.claimableBonds(alice.address)).to.equal(baseBond);
+
+      const forkId = await epbm.forkIdByMandate(1n);
+      expect(forkId).to.be.gt(0n);
+
+      const fork = await forkRegistry.getFork(forkId);
+      expect(fork.mandateId).to.equal(1n);
+      expect(fork.proposer).to.equal(alice.address);
+      expect(fork.branchOwner).to.equal(charlie.address);
+      expect(fork.active).to.equal(true);
+      expect(fork.governance).to.equal(fork.branchGovernor);
+      expect(await epbm.governance()).to.equal(fork.branchGovernor);
+    });
+
+    it("migrates the treasury into the live branch governor", async function () {
+      const { epbm, forkRegistry, target, alice, bob, charlie, baseBond } = await deployFixture();
+
+      await proposeSimple(epbm, target, alice, baseBond);
+      await epbm.connect(alice).castVote(1n, 0);
+      await epbm.connect(bob).castVote(1n, 0);
+      await fastForwardPastVoting(epbm);
+      await epbm.evaluate(1n);
+      await fastForwardPastExecution(epbm);
+      await epbm.claimExpiredBond(1n);
+
+      expect(await epbm.slashedBondPool()).to.equal(baseBond);
+
+      await proposeSimple(epbm, target, alice, baseBond);
+      await epbm.connect(alice).castVote(2n, 0); // YES
+      await epbm.connect(bob).castVote(2n, 0);   // YES
+      await epbm.connect(charlie).castVote(2n, 1); // NO minority large enough to fork
+
+      await fastForwardPastVoting(epbm, 2n);
+      await epbm.evaluate(2n);
+
+      await epbm.connect(charlie).registerForkIntent(2n);
+
+      const forkId = await epbm.forkIdByMandate(2n);
+      const fork = await forkRegistry.getFork(forkId);
+
+      expect(await epbm.slashedBondPool()).to.equal(0n);
+      expect(await epbm.governance()).to.equal(fork.branchGovernor);
+      expect(await ethers.provider.getBalance(fork.branchGovernor)).to.equal(baseBond);
+      expect(fork.treasuryBalance).to.equal(baseBond);
     });
 
     it("reverts for YES voters", async function () {
@@ -740,7 +800,7 @@ describe("EPBM", function () {
       await epbm.connect(owner).updateConfig(
         ethers.parseEther("0.2"), // baseBond doubled
         2n * WAD,
-        1000n, 2000n, 5000n, 1000n, 2000n,
+        1000n, 2000n, 5000n, 1000n, 2000n, 1000n,
         WEEK, 2n * DAY,
         WAD,
       );
@@ -755,7 +815,7 @@ describe("EPBM", function () {
         epbm.connect(alice).updateConfig(
           ethers.parseEther("0.2"),
           2n * WAD,
-          1000n, 2000n, 5000n, 1000n, 2000n,
+          1000n, 2000n, 5000n, 1000n, 2000n, 1000n,
           WEEK, 2n * DAY,
           WAD,
         ),

@@ -15,11 +15,14 @@ async function main() {
   await registry.waitForDeployment();
   console.log("PersonhoodRegistry:", await registry.getAddress());
 
-  // ── 2. Governance token (mock — replace with real ERC20Votes in production) ──
-  const Token = await ethers.getContractFactory("MockVotes");
-  const token = await Token.deploy();
+    // ── 2. Governance token ──────────────────────────────────────────────────
+    const Token = await ethers.getContractFactory("GovernanceToken");
+    const token = await Token.deploy("EPBM Governance Token", "EPBM", deployer.address);
   await token.waitForDeployment();
-  console.log("MockVotes token:   ", await token.getAddress());
+    console.log("GovernanceToken:   ", await token.getAddress());
+
+    // Seed an initial supply for bootstrap/distribution in a production deployment.
+    await token.mint(deployer.address, ethers.parseEther("1000000"));
 
   // ── 3. EPBM core contract ────────────────────────────────────────────────
   //
@@ -46,6 +49,9 @@ async function main() {
   //   vetoThresholdBPS      = 1500  (15%)
   //     → 15% hard NO triggers minority veto
   //
+  //   forkActivationThresholdBPS = 2000  (20%)
+  //     → 20% of eligible weight can activate a fork and block execution
+  //
   //   votingPeriod          = 7 days
   //   executionWindow       = 3 days
   //
@@ -56,6 +62,7 @@ async function main() {
   const epbm = await EPBM.deploy(
     await token.getAddress(),
     await registry.getAddress(),
+    ethers.ZeroAddress,
     ethers.parseEther("1"),      // baseBond
     3n * WAD,                    // bondEntropyFactor
     1000n,                       // baseQuorumBPS
@@ -63,6 +70,7 @@ async function main() {
     5000n,                       // passageThresholdBPS
     2000n,                       // passageEntropyFactor
     1500n,                       // vetoThresholdBPS
+    2000n,                       // forkActivationThresholdBPS
     WEEK,                        // votingPeriod
     3n * DAY,                    // executionWindow
     WAD / 2n,                    // personhoodBoostFactor (0.5)
@@ -70,9 +78,16 @@ async function main() {
   await epbm.waitForDeployment();
   console.log("EPBM:              ", await epbm.getAddress());
 
+  // ── 4. ForkRegistry ─────────────────────────────────────────────────────
+  const ForkRegistry = await ethers.getContractFactory("ForkRegistry");
+  const forkRegistry = await ForkRegistry.deploy(await epbm.getAddress());
+  await forkRegistry.waitForDeployment();
+  await epbm.setForkRegistry(await forkRegistry.getAddress());
+  console.log("ForkRegistry:      ", await forkRegistry.getAddress());
+
   console.log("\n✓ Deployment complete.");
   console.log("  → Transfer PersonhoodRegistry admin to a multisig before mainnet launch.");
-  console.log("  → Replace MockVotes with a real ERC20Votes token.");
+    console.log("  → Distribute the initial governance supply and transfer token ownership.");
   console.log("  → Transfer EPBM governance to address(epbm) to make the protocol self-governing.");
 }
 

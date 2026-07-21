@@ -2,6 +2,8 @@
 pragma solidity ^0.8.24;
 
 import {IEPBM}                from "./interfaces/IEPBM.sol";
+import {IForkRegistry}        from "./interfaces/IForkRegistry.sol";
+import {ForkBranchGovernor}   from "./ForkBranchGovernor.sol";
 import {IVotes}               from "./interfaces/IVotes.sol";
 import {IPersonhoodRegistry}  from "./interfaces/IPersonhoodRegistry.sol";
 import {EntropyLib}           from "./libraries/EntropyLib.sol";
@@ -28,8 +30,9 @@ import {EntropyLib}           from "./libraries/EntropyLib.sol";
 /// │                                                                         │
 /// │  4. MINORITY VETO & FORK RIGHTS                                         │
 /// │     If NO votes exceed vetoThresholdBPS of total eligible weight the    │
-/// │     mandate is VETOED.  NO voters can also signal exit intent via       │
-/// │     registerForkIntent(), a placeholder for a future fork mechanism.    │
+/// │     mandate is VETOED.  If enough minority support registers fork       │
+/// │     intent before execution, the mandate is marked FORKED and its bond  │
+/// │     is returned instead of being executable.                            │
 /// │                                                                         │
 /// │  5. SCOPED, TIME-BOUNDED EFFECTS                                        │
 /// │     Each mandate carries a scope identifier and an execution deadline.  │
@@ -94,6 +97,9 @@ contract EPBM is IEPBM {
     /// @notice How long (seconds) after passage the proposer has to execute.
     uint256 public executionWindow;
 
+    /// @notice Minimum minority exit support required to activate a fork [BPS].
+    uint256 public forkActivationThresholdBPS;
+
     /// @notice Personhood weight boost.
     ///         effectiveWeight = stakeWeight × (WAD + personhoodBoostFactor × score / 100) / WAD
     uint256 public personhoodBoostFactor;
@@ -107,6 +113,9 @@ contract EPBM is IEPBM {
 
     /// @notice Personhood / reputation registry.
     IPersonhoodRegistry public personhoodRegistry;
+
+    /// @notice Registry that records concrete fork branches.
+    IForkRegistry public forkRegistry;
 
     /// @notice Address with power to update protocol config.
     ///         In production, set this to address(this) and route changes through mandates.
@@ -124,6 +133,11 @@ contract EPBM is IEPBM {
 
     mapping(uint256 => Mandate) private _mandates;
     mapping(uint256 => mapping(address => VoteRecord)) private _votes;
+    mapping(uint256 => mapping(address => bool)) private _forkIntents;
+    mapping(uint256 => uint256) public forkIntentWeight;
+    mapping(uint256 => uint256) public forkIdByMandate;
+
+    error ForkRegistryNotSet();
 
     // ─────────────────────────────────────────────────────────────────────────
     // Entropy history ring-buffer
@@ -163,6 +177,7 @@ contract EPBM is IEPBM {
     constructor(
         address _token,
         address _personhoodRegistry,
+        address _forkRegistry,
         uint256 _baseBond,
         uint256 _bondEntropyFactor,
         uint256 _baseQuorumBPS,
@@ -170,6 +185,7 @@ contract EPBM is IEPBM {
         uint256 _passageThresholdBPS,
         uint256 _passageEntropyFactor,
         uint256 _vetoThresholdBPS,
+        uint256 _forkActivationThresholdBPS,
         uint256 _votingPeriod,
         uint256 _executionWindow,
         uint256 _personhoodBoostFactor
@@ -177,6 +193,7 @@ contract EPBM is IEPBM {
         governance            = msg.sender;
         token                 = IVotes(_token);
         personhoodRegistry    = IPersonhoodRegistry(_personhoodRegistry);
+        forkRegistry          = IForkRegistry(_forkRegistry);
         baseBond              = _baseBond;
         bondEntropyFactor     = _bondEntropyFactor;
         baseQuorumBPS         = _baseQuorumBPS;
@@ -184,6 +201,7 @@ contract EPBM is IEPBM {
         passageThresholdBPS   = _passageThresholdBPS;
         passageEntropyFactor  = _passageEntropyFactor;
         vetoThresholdBPS      = _vetoThresholdBPS;
+        forkActivationThresholdBPS = _forkActivationThresholdBPS;
         votingPeriod          = _votingPeriod;
         executionWindow       = _executionWindow;
         personhoodBoostFactor = _personhoodBoostFactor;
@@ -421,18 +439,57 @@ contract EPBM is IEPBM {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// @inheritdoc IEPBM
-    /// @dev Emits ForkIntentRegistered as an on-chain signal.
-    ///      Full fork mechanics (token split, state migration) require a separate
-    ///      ForkRegistry contract and are left as a protocol-level extension.
-    function registerForkIntent(uint256 mandateId) external {
+    /// @dev Fork intent becomes actionable once the registered minority weight
+    ///      crosses forkActivationThresholdBPS of eligible weight.
+    function registerForkIntent(uint256 mandateId) external nonReentrant {
         Mandate storage m = _mandates[mandateId];
-        if (m.state != MandateState.PASSED && m.state != MandateState.EXECUTED) {
+        if (m.state != MandateState.PASSED) {
             revert InvalidMandateState(m.state);
         }
+        if (block.timestamp > m.executionDeadline) revert ExecutionWindowExpired();
         VoteRecord storage v = _votes[mandateId][msg.sender];
         if (v.choice != VoteChoice.NO || v.weight == 0) revert NoVotingPower();
 
+        if (_forkIntents[mandateId][msg.sender]) revert ForkIntentAlreadyRegistered();
+
+        _forkIntents[mandateId][msg.sender] = true;
+        forkIntentWeight[mandateId] += v.weight;
+
         emit ForkIntentRegistered(mandateId, msg.sender, v.weight);
+
+        uint256 thresholdWeight = (m.totalEligibleWeight * forkActivationThresholdBPS) / BPS_DENOM;
+        if (thresholdWeight > 0 && forkIntentWeight[mandateId] >= thresholdWeight) {
+            m.state = MandateState.FORKED;
+            if (address(forkRegistry) == address(0)) revert ForkRegistryNotSet();
+            uint256 forkTreasury = slashedBondPool;
+            slashedBondPool = 0;
+
+            (uint256 forkId, address branchGovernor) = forkRegistry.createFork(
+                mandateId,
+                m.proposer,
+                msg.sender,
+                m.scope,
+                address(token),
+                address(personhoodRegistry),
+                governance,
+                forkTreasury,
+                forkIntentWeight[mandateId],
+                thresholdWeight
+            );
+            forkIdByMandate[mandateId] = forkId;
+
+            pendingGovernance = branchGovernor;
+
+            if (forkTreasury > 0) {
+                (bool ok,) = payable(branchGovernor).call{value: forkTreasury}("");
+                require(ok, "Fork treasury transfer failed");
+            }
+
+            ForkBranchGovernor(payable(branchGovernor)).bootstrapForkMigration();
+
+            _queueBondReturn(m);
+            emit MandateForked(mandateId, forkIntentWeight[mandateId], thresholdWeight);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -452,6 +509,11 @@ contract EPBM is IEPBM {
     function setScopeTarget(bytes32 scope, address target, bool allowed) external onlyGovernance {
         scopeTargetAllowed[scope][target] = allowed;
         emit ScopeTargetUpdated(scope, target, allowed);
+    }
+
+    /// @notice Set or update the fork registry used to record concrete branches.
+    function setForkRegistry(address _forkRegistry) external onlyGovernance {
+        forkRegistry = IForkRegistry(_forkRegistry);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -494,6 +556,7 @@ contract EPBM is IEPBM {
         uint256 _passageThresholdBPS,
         uint256 _passageEntropyFactor,
         uint256 _vetoThresholdBPS,
+        uint256 _forkActivationThresholdBPS,
         uint256 _votingPeriod,
         uint256 _executionWindow,
         uint256 _personhoodBoostFactor
@@ -501,6 +564,7 @@ contract EPBM is IEPBM {
         require(_baseQuorumBPS       <= BPS_DENOM, "quorum > 100%");
         require(_passageThresholdBPS <= BPS_DENOM, "passage > 100%");
         require(_vetoThresholdBPS    <= BPS_DENOM, "veto > 100%");
+        require(_forkActivationThresholdBPS <= BPS_DENOM, "fork > 100%");
 
         baseBond              = _baseBond;
         bondEntropyFactor     = _bondEntropyFactor;
@@ -509,6 +573,7 @@ contract EPBM is IEPBM {
         passageThresholdBPS   = _passageThresholdBPS;
         passageEntropyFactor  = _passageEntropyFactor;
         vetoThresholdBPS      = _vetoThresholdBPS;
+        forkActivationThresholdBPS = _forkActivationThresholdBPS;
         votingPeriod          = _votingPeriod;
         executionWindow       = _executionWindow;
         personhoodBoostFactor = _personhoodBoostFactor;

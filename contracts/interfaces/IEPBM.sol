@@ -9,7 +9,7 @@ pragma solidity ^0.8.24;
 ///
 /// State machine:
 ///   NONE → VOTING → PASSED | DEFEATED | VETOED
-///   PASSED → EXECUTED | EXPIRED
+///   PASSED → EXECUTED | EXPIRED | FORKED
 interface IEPBM {
     // ─── Enums ────────────────────────────────────────────────────────────────
 
@@ -20,7 +20,8 @@ interface IEPBM {
         DEFEATED, // 3 – failed quorum or threshold
         VETOED,   // 4 – minority veto threshold exceeded
         EXECUTED, // 5 – actions successfully executed
-        EXPIRED   // 6 – passed but not executed within the execution window
+        EXPIRED,  // 6 – passed but not executed within the execution window
+        FORKED    // 7 – minority exit activated before execution
     }
 
     enum VoteChoice {
@@ -103,6 +104,12 @@ interface IEPBM {
         uint256 weight
     );
 
+    event MandateForked(
+        uint256 indexed mandateId,
+        uint256 forkWeight,
+        uint256 thresholdWeight
+    );
+
     event ConfigUpdated();
 
     // ─── Errors ───────────────────────────────────────────────────────────────
@@ -120,6 +127,7 @@ interface IEPBM {
     error NotProposer();
     error NotGovernance();
     error CallFailed(uint256 index);
+    error ForkIntentAlreadyRegistered();
 
     // ─── Core functions ───────────────────────────────────────────────────────
 
@@ -146,14 +154,42 @@ interface IEPBM {
     /// @notice Slash the bond of a PASSED mandate that missed its execution window.
     function claimExpiredBond(uint256 mandateId) external;
 
-    /// @notice Register minority exit intent for a PASSED or EXECUTED mandate.
+    /// @notice Register minority exit intent for a PASSED mandate.
     ///         Only voters who voted NO may call this.
     function registerForkIntent(uint256 mandateId) external;
 
+    /// @notice Initiate a governance transfer to a new controller address.
+    function initiateGovernanceTransfer(address newGovernance) external;
+
+    /// @notice Accept a pending governance transfer.
+    function acceptGovernanceTransfer() external;
+
+    /// @notice Set or update the fork registry.
+    function setForkRegistry(address _forkRegistry) external;
+
+    /// @notice Allow or disallow a target for a given scope.
+    function setScopeTarget(bytes32 scope, address target, bool allowed) external;
+
+    /// @notice Withdraw accumulated slashed bonds to a treasury address.
+    function withdrawSlashedBonds(address payable to) external;
+
+    /// @notice Update protocol parameters.
+    function updateConfig(
+        uint256 _baseBond,
+        uint256 _bondEntropyFactor,
+        uint256 _baseQuorumBPS,
+        uint256 _quorumEntropyFactor,
+        uint256 _passageThresholdBPS,
+        uint256 _passageEntropyFactor,
+        uint256 _vetoThresholdBPS,
+        uint256 _forkActivationThresholdBPS,
+        uint256 _votingPeriod,
+        uint256 _executionWindow,
+        uint256 _personhoodBoostFactor
+    ) external;
+
     /// @notice Pull claimable bond back after a DEFEATED or VETOED outcome.
     function claimBond() external;
-
-    function setScopeTarget(bytes32 scope, address target, bool allowed) external;
 
     // ─── View functions ───────────────────────────────────────────────────────
 
