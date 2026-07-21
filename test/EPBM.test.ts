@@ -63,6 +63,7 @@ async function deployFixture() {
   // 4. Mock execution target
   const Target = await ethers.getContractFactory("MockTarget");
   const target = (await Target.deploy()) as unknown as MockTarget;
+  const auxTarget = (await Target.deploy()) as unknown as MockTarget;
 
   // Distribute voting tokens:
   //   alice   = 600 tokens (60%)
@@ -77,9 +78,12 @@ async function deployFixture() {
   // Give alice a personhood score
   await registry.setScore(alice.address, 50);  // 50/100
 
+  await epbm.setScopeTarget(scopeId("treasury"), target.target as string, true);
+  await epbm.setScopeTarget(scopeId("x"), target.target as string, true);
+
   const baseBond = ethers.parseEther("0.1");
 
-  return { epbm, token, registry, target, owner, alice, bob, charlie, stranger, baseBond };
+  return { epbm, token, registry, target, auxTarget, owner, alice, bob, charlie, stranger, baseBond };
 }
 
 /** Fast-forward past the voting deadline of mandate 1 */
@@ -177,6 +181,21 @@ describe("EPBM", function () {
       ).to.be.revertedWithCustomError(epbm, "LengthMismatch");
     });
 
+    it("reverts when a target is not allowed for the mandate scope", async function () {
+      const { epbm, alice, auxTarget, baseBond } = await deployFixture();
+
+      await expect(
+        epbm.connect(alice).propose(
+          descHash("bad"),
+          scopeId("treasury"),
+          [auxTarget.target as string],
+          [0n],
+          ["0x"],
+          { value: baseBond },
+        ),
+      ).to.be.revertedWithCustomError(epbm, "ScopeTargetNotAllowed");
+    });
+
     it("emits MandateCreated with correct parameters", async function () {
       const { epbm, target, alice, baseBond } = await deployFixture();
 
@@ -233,6 +252,17 @@ describe("EPBM", function () {
 
       const v = await epbm.getVote(1n, bob.address);
       expect(v.weight).to.equal(stake); // no boost
+    });
+
+    it("uses the proposal snapshot even if token balances change later", async function () {
+      const { epbm, bob, token } = await withProposal();
+
+      await token.mint(bob.address, ethers.parseEther("1000"));
+
+      await epbm.connect(bob).castVote(1n, 1); // NO
+
+      const v = await epbm.getVote(1n, bob.address);
+      expect(v.weight).to.equal(ethers.parseEther("300"));
     });
 
     it("prevents double voting", async function () {
@@ -497,6 +527,22 @@ describe("EPBM", function () {
       expect(await epbm.slashedBondPool()).to.equal(baseBond);
     });
 
+    it("can finalize and slash an expired mandate without a prior evaluate() call", async function () {
+      const { epbm, target, alice, bob, stranger, baseBond } = await deployFixture();
+
+      await proposeSimple(epbm, target, alice, baseBond);
+      await epbm.connect(alice).castVote(1n, 0);
+      await epbm.connect(bob).castVote(1n, 0);
+
+      await fastForwardPastExecution(epbm);
+
+      await epbm.connect(stranger).claimExpiredBond(1n);
+
+      const m = await epbm.getMandate(1n);
+      expect(m.state).to.equal(6n); // EXPIRED
+      expect(await epbm.slashedBondPool()).to.equal(baseBond);
+    });
+
     it("reverts if execution window is still open", async function () {
       const { epbm, target, alice, bob, baseBond } = await deployFixture();
 
@@ -586,6 +632,22 @@ describe("EPBM", function () {
       expect(bondAfter).to.be.gte(bondBefore);
     });
 
+    it("does not dilute entropy history with unevaluated mandates", async function () {
+      const { epbm, target, alice, bob, baseBond } = await deployFixture();
+
+      await proposeSimple(epbm, target, alice, baseBond);
+      await epbm.connect(alice).castVote(1n, 0);
+      await epbm.connect(bob).castVote(1n, 1);
+      await fastForwardPastVoting(epbm);
+      await epbm.evaluate(1n);
+
+      const bondAfterFirstEvaluation = await epbm.computeRequiredBond();
+
+      await proposeSimple(epbm, target, alice, bondAfterFirstEvaluation);
+
+      expect(await epbm.computeRequiredBond()).to.equal(bondAfterFirstEvaluation);
+    });
+
     it("bond stays at base when all votes are unanimous (zero entropy)", async function () {
       const { epbm, target, alice, bob, charlie, baseBond } = await deployFixture();
 
@@ -598,6 +660,48 @@ describe("EPBM", function () {
 
       expect(await epbm.historicalAverageEntropy()).to.equal(0n);
       expect(await epbm.computeRequiredBond()).to.equal(baseBond);
+    });
+  });
+
+  // ── Invariants ─────────────────────────────────────────────────────────
+
+  describe("invariants", function () {
+    it("keeps bond accounting isolated across mandates", async function () {
+      const { epbm, target, alice, bob, stranger, baseBond } = await deployFixture();
+
+      await proposeSimple(epbm, target, alice, baseBond);
+      await epbm.connect(alice).castVote(1n, 0);
+      await epbm.connect(bob).castVote(1n, 0);
+      await fastForwardPastVoting(epbm);
+      await epbm.evaluate(1n);
+      await fastForwardPastExecution(epbm);
+      await epbm.connect(stranger).claimExpiredBond(1n);
+
+      const bondAfterFirst = await epbm.slashedBondPool();
+
+      await proposeSimple(epbm, target, alice, baseBond);
+      await epbm.connect(alice).castVote(2n, 0);
+      await epbm.connect(bob).castVote(2n, 0);
+      await fastForwardPastVoting(epbm);
+      await epbm.evaluate(2n);
+
+      expect(await epbm.slashedBondPool()).to.equal(bondAfterFirst);
+      expect(await epbm.claimableBonds(alice.address)).to.equal(baseBond);
+    });
+
+    it("does not allow claiming the same bond twice", async function () {
+      const { epbm, target, alice, bob, baseBond } = await deployFixture();
+
+      await proposeSimple(epbm, target, alice, baseBond);
+      await epbm.connect(alice).castVote(1n, 0);
+      await epbm.connect(bob).castVote(1n, 0);
+      await fastForwardPastVoting(epbm);
+      await epbm.evaluate(1n);
+      await epbm.connect(alice).execute(1n, { value: 0n });
+
+      await epbm.connect(alice).claimBond();
+
+      await expect(epbm.connect(alice).claimBond()).to.be.revertedWith("Nothing to claim");
     });
   });
 

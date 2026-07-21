@@ -113,6 +113,9 @@ contract EPBM is IEPBM {
     address public governance;
     address public pendingGovernance;
 
+    /// @notice Allowed execution targets per scope.
+    mapping(bytes32 => mapping(address => bool)) public scopeTargetAllowed;
+
     // ─────────────────────────────────────────────────────────────────────────
     // Mandate storage
     // ─────────────────────────────────────────────────────────────────────────
@@ -128,6 +131,7 @@ contract EPBM is IEPBM {
 
     uint256[8] private _entropyHistory; // WAD-scaled normalised entropy per mandate
     uint256 private _entropyHead;       // next write position (wraps mod ENTROPY_WINDOW)
+    uint256 private _entropyCount;      // number of populated entries, capped at ENTROPY_WINDOW
 
     // ─────────────────────────────────────────────────────────────────────────
     // Pull-payment accounting
@@ -199,6 +203,12 @@ contract EPBM is IEPBM {
     ) external payable nonReentrant returns (uint256 mandateId) {
         if (targets.length == 0 || targets.length != values.length || targets.length != calldatas.length) {
             revert LengthMismatch();
+        }
+
+        for (uint256 i = 0; i < targets.length; i++) {
+            if (!scopeTargetAllowed[scope][targets[i]]) {
+                revert ScopeTargetNotAllowed(scope, targets[i]);
+            }
         }
 
         uint256 required = computeRequiredBond();
@@ -275,6 +285,10 @@ contract EPBM is IEPBM {
     /// @inheritdoc IEPBM
     /// @dev Anyone may call evaluate() once the voting deadline has passed.
     function evaluate(uint256 mandateId) external returns (MandateState outcome) {
+        outcome = _evaluate(mandateId);
+    }
+
+    function _evaluate(uint256 mandateId) internal returns (MandateState outcome) {
         Mandate storage m = _mandates[mandateId];
         if (m.state != MandateState.VOTING)       revert InvalidMandateState(m.state);
         if (block.timestamp < m.votingDeadline)   revert VotingStillOpen();
@@ -288,6 +302,9 @@ contract EPBM is IEPBM {
         // Record in ring-buffer for historical averaging
         _entropyHistory[_entropyHead % ENTROPY_WINDOW] = entropy;
         _entropyHead++;
+        if (_entropyCount < ENTROPY_WINDOW) {
+            _entropyCount++;
+        }
 
         // ── Veto check ────────────────────────────────────────────────────────
         // If NO weight exceeds vetoThresholdBPS of total eligible, mandate is vetoed.
@@ -381,8 +398,14 @@ contract EPBM is IEPBM {
     /// @inheritdoc IEPBM
     function claimExpiredBond(uint256 mandateId) external {
         Mandate storage m = _mandates[mandateId];
-        if (m.state != MandateState.PASSED)           revert InvalidMandateState(m.state);
-        if (block.timestamp <= m.executionDeadline)   revert ExecutionWindowOpen();
+
+        if (m.state == MandateState.VOTING) {
+            if (block.timestamp < m.votingDeadline) revert VotingStillOpen();
+            _evaluate(mandateId);
+        }
+
+        if (m.state != MandateState.PASSED)         revert InvalidMandateState(m.state);
+        if (block.timestamp <= m.executionDeadline) revert ExecutionWindowOpen();
 
         m.state = MandateState.EXPIRED;
         uint256 bond = m.bondAmount;
@@ -423,6 +446,12 @@ contract EPBM is IEPBM {
         claimableBonds[msg.sender] = 0;
         (bool ok,) = msg.sender.call{value: amount}("");
         require(ok, "Transfer failed");
+    }
+
+    /// @notice Allow or disallow a target for a given scope.
+    function setScopeTarget(bytes32 scope, address target, bool allowed) external onlyGovernance {
+        scopeTargetAllowed[scope][target] = allowed;
+        emit ScopeTargetUpdated(scope, target, allowed);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -558,7 +587,7 @@ contract EPBM is IEPBM {
     // ─────────────────────────────────────────────────────────────────────────
 
     function _historicalAverageEntropy() internal view returns (uint256) {
-        uint256 count = mandateCount < ENTROPY_WINDOW ? mandateCount : ENTROPY_WINDOW;
+        uint256 count = _entropyCount;
         if (count == 0) return 0;
         uint256 sum;
         for (uint256 i; i < count; i++) {

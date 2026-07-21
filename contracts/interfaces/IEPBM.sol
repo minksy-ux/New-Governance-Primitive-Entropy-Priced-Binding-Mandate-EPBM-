@@ -95,6 +95,8 @@ interface IEPBM {
 
     event BondReturned(uint256 indexed mandateId, address indexed proposer, uint256 amount);
 
+    event ScopeTargetUpdated(bytes32 indexed scope, address indexed target, bool allowed);
+
     event ForkIntentRegistered(
         uint256 indexed mandateId,
         address indexed voter,
@@ -112,6 +114,7 @@ interface IEPBM {
     error AlreadyVoted();
     error NoVotingPower();
     error LengthMismatch();
+    error ScopeTargetNotAllowed(bytes32 scope, address target);
     error ExecutionWindowExpired();
     error ExecutionWindowOpen();
     error NotProposer();
@@ -149,6 +152,8 @@ interface IEPBM {
 
     /// @notice Pull claimable bond back after a DEFEATED or VETOED outcome.
     function claimBond() external;
+
+    function setScopeTarget(bytes32 scope, address target, bool allowed) external;
 
     // ─── View functions ───────────────────────────────────────────────────────
 
