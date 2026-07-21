@@ -1,0 +1,96 @@
+name: Security Gates
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile
+        run: npm run compile
+
+      - name: Verify maturity artifacts
+        run: npm run check:maturity-artifacts
+
+      - name: Run security test suite
+        run: npm run test:security
+
+  audit-traceability-artifacts:
+    runs-on: ubuntu-latest
+    needs: security-gates
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate coverage report (best effort)
+        id: coverage
+        run: |
+          set +e
+          npm run coverage 2>&1 | tee coverage-attempt.log
+          status=${PIPESTATUS[0]}
+          echo "coverage_exit_code=${status}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload drill evidence artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: drill-evidence-runs
+          path: docs/operations/drills/runs/*.md
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: solidity-coverage-report
+          path: |
+            coverage/**
+            coverage.json
+            coverage-attempt.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Print coverage outcome
+        run: |
+          if [ "${{ steps.coverage.outputs.coverage_exit_code }}" != "0" ]; then
+            echo "Coverage generation encountered a known instrumentation/compiler issue. See coverage-attempt.log artifact."
+          else
+            echo "Coverage generation succeeded."
+          fi

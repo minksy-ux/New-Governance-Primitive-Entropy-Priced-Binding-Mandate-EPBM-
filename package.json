@@ -5,10 +5,16 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
-    "coverage": "hardhat coverage",
+    "test:security": "hardhat test test/EPBM.invariants.test.ts test/EPBM.adversarial.test.ts",
+    "coverage": "COVERAGE=true hardhat coverage",
     "node": "hardhat node",
     "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
-    "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia"
+    "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia",
+    "check:maturity-artifacts": "hardhat run scripts/check-maturity-artifacts.ts",
+    "check:finalization-readiness": "hardhat run scripts/check-finalization-readiness.ts",
+    "check:finalization-readiness:local": "hardhat run scripts/check-finalization-readiness.ts --network localhost",
+    "simulate:capture": "hardhat run scripts/simulate-capture.ts",
+    "simulate:capture:sweep": "hardhat run scripts/sweep-capture.ts"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",

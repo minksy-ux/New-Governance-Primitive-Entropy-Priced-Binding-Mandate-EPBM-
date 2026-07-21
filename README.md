@@ -34,6 +34,219 @@ By integrating mechanism design, cryptography, and information theory at the con
 - Built-in minority safeguards through scoped mandates, veto mechanics, and forkable exits
 - Formal-verification-friendly core rules and upgrade pathways
 
+## Simpler Mental Model
+
+EPBM can be reasoned about as four compact loops:
+
+1. Propose: lock bond, declare bounded actions.
+2. Decide: weighted vote with personhood modulation.
+3. Settle: execute before deadline or slash bond.
+4. Exit: if minority threshold is crossed, activate fork branch and migrate treasury/governance.
+
+This keeps the primitive legible even as optional hardening modules (timelocks, attestations, branch lifecycle) are enabled.
+
+## Trust Assumptions (Current)
+
+1. Personhood oracle trust:
+	- Scores come from verifier-signed attestations.
+	- Registry now supports multiple active verifier keys.
+	- Direct admin writes can be irreversibly disabled.
+2. Governance trust:
+	- Governance can tune protocol parameters and treasury behavior.
+	- Two-step transfer plus optional delay reduces immediate key-risk.
+3. Social fallback:
+	- Fork rights are the final cryptoeconomic escape hatch when governance legitimacy fails.
+
+## Governance Capture and Social Recovery
+
+If governance is captured, recovery path is explicit:
+
+1. Detect: monitor anomalous config updates, treasury drains, or verifier churn.
+2. Slow: enforce governance/branch action delays to expand human response time.
+3. Exit: minority stakeholders register fork intent and activate a branch.
+4. Re-anchor: branch governance and treasury become the new coordination anchor.
+5. Ratify: social consensus (users, infra, ecosystem) chooses canonical branch legitimacy.
+
+## Decentralization Minimization Path
+
+Recommended sequence to minimize trusted control over time:
+
+1. Bootstrap:
+	- Keep admin/governance multisig with strict opsec and public monitoring.
+2. Distribute attestation power:
+	- Add multiple verifiers and publish verifier admission/removal policy.
+3. Remove manual oracle override:
+	- Call `disableManualScoreWrites()` in `PersonhoodRegistry` once verifier pipeline is stable.
+	- For a hard trust-minimization checkpoint, call `finalizeDecentralization()` to permanently freeze admin and verifier-set mutation.
+4. Increase governance latency:
+	- Set non-zero governance transfer delay and branch privileged-action delays.
+5. Constrain upgrade surface:
+	- Move parameter changes behind mandates and documented policy bounds.
+6. Entrench social-layer accountability:
+	- Pre-publish fork-runbooks, incident playbooks, and canonical recovery criteria.
+
+## Minimal Primitive Mode
+
+To reduce long-run protocol complexity, EPBM now supports an irreversible governance-surface freeze:
+
+1. Ensure readiness checklist is satisfied:
+	- fork registry is configured
+	- no pending governance transfer exists
+	- governance transfer delay is at least `MIN_GOVERNANCE_TRANSFER_DELAY_FOR_FINALIZATION`
+2. Call `finalizeProtocolSurface()` on EPBM once governance policy is stable.
+2. This permanently disables mutable governance-surface setters:
+	- scope target mutation
+	- fork registry replacement
+	- treasury asset registration
+	- governance transfer delay changes
+	- protocol config parameter updates
+
+This keeps the live primitive smaller and easier to reason about after bootstrap.
+
+Use `protocolSurfaceFinalizationReadiness()` to preflight these checks in one call.
+
+## Verifier Governance Hardening
+
+Personhood verifier governance remains a social process, but contract constraints now reduce failure modes:
+
+1. Multi-verifier support via `setVerifierStatus`.
+2. Timelocked verifier churn once manual writes are disabled:
+	- queue with `queueVerifierStatusChange(address,bool)`
+	- apply after delay via `setVerifierStatus(address,bool)`
+3. Verifier churn floor enforcement:
+	- verifier set cannot be reduced below `MIN_VERIFIERS_FOR_FINALIZATION` after manual-write disablement.
+4. One-way freeze via `finalizeDecentralization()` once readiness checks pass.
+
+These constraints reduce single-key governance risk even though verifier admission policy remains social.
+
+## Legitimacy Boundary
+
+Fork legitimacy still depends on ecosystem coordination that contracts cannot fully automate.
+
+Operationally, EPBM treats legitimacy as a layered process:
+
+1. Onchain objective checks (vote state, fork thresholds, treasury migration).
+2. Public incident reporting and branch-state transparency.
+3. Offchain ecosystem convergence (clients, exchanges, infra, social consensus).
+
+The protocol can enforce procedure; communities still determine canonical legitimacy in contested events.
+
+## Formal Verification and Mechanism Analysis Roadmap
+
+The current test suite is broad, but security maturity requires formal and adversarial analysis beyond unit tests.
+
+Planned work:
+
+1. Functional invariants:
+	- treasury conservation across execute/fork/withdraw paths
+	- single-claim guarantees for bonds and slashed pools
+	- irreversible freeze properties for EPBM and PersonhoodRegistry
+2. State-machine proofs:
+	- mandate lifecycle monotonicity
+	- branch lifecycle monotonicity
+	- governance transfer delay correctness
+3. Mechanism stress analysis:
+	- cartel and capture simulations under concentrated voting power
+	- verifier collusion and churn scenarios
+	- fork race and legitimacy-fragmentation game analysis
+
+Practical starting point:
+
+1. Run Monte Carlo capture sweeps with:
+	- `ROUNDS=10000 npm run simulate:capture`
+2. Optional CLI flag form (note extra `--` for Hardhat script args):
+	- `npm run simulate:capture -- -- --rounds 10000`
+3. Compare cartel win rates as you vary:
+	- `baseQuorumBps`
+	- `quorumEntropyFactorBps`
+	- `passageThresholdBps`
+	- `passageEntropyFactorBps`
+	- `vetoThresholdBps`
+4. Generate frontier CSV across parameter grids:
+	- `ROUNDS=3000 npm run simulate:capture:sweep`
+5. Write sweep output directly to file:
+	- `OUT_FILE=analysis/capture-frontier.csv ROUNDS=3000 npm run simulate:capture:sweep`
+6. Override sweep grids with environment lists (comma-separated integers):
+	- `BASE_QUORUM_BPS_LIST`
+	- `QUORUM_ENTROPY_FACTOR_BPS_LIST`
+	- `PASSAGE_THRESHOLD_BPS_LIST`
+	- `PASSAGE_ENTROPY_FACTOR_BPS_LIST`
+	- `VETO_THRESHOLD_BPS_LIST`
+
+## Operational Preflight
+
+Before calling `finalizeDecentralization()` on `PersonhoodRegistry`, run the readiness preflight script:
+
+1. With explicit address argument:
+	- `npx hardhat run scripts/check-finalization-readiness.ts --network <network> -- <registryAddress>`
+2. With environment variable:
+	- `REGISTRY_ADDRESS=<registryAddress> npx hardhat run scripts/check-finalization-readiness.ts --network <network>`
+3. Local alias:
+	- `npm run check:finalization-readiness:local -- <registryAddress>`
+
+The script exits non-zero when checklist blockers exist (manual writes not disabled, pending admin transfer, or insufficient active verifier count).
+
+## Maturity Stage Execution Pack
+
+This repository now includes concrete artifacts for both maturity phases requested.
+
+### Audit-Ready Stage
+
+Primary stage guide:
+- `docs/security/AUDIT_READY_STAGE.md`
+
+Security evidence templates:
+- `docs/security/SECURITY_REPORT_TEMPLATE.md`
+- `docs/security/remediation-log.csv`
+- `docs/security/FORMAL_INVARIANTS_SPEC.md`
+
+Operational drill runbooks:
+- `docs/operations/drills/capture-event-drill.md`
+- `docs/operations/drills/disputed-fork-drill.md`
+- `docs/operations/drills/verifier-compromise-drill.md`
+
+Adversarial and invariant security tests:
+- `npm run test:security`
+
+Artifact completeness gate:
+- `npm run check:maturity-artifacts`
+
+CI traceability artifacts (on push/PR):
+- drill run evidence bundle (`docs/operations/drills/runs/*.md`)
+- solidity coverage bundle (`coverage/**`, `coverage.json`) or coverage attempt log (`coverage-attempt.log`) when instrumentation/compiler limits are hit
+
+First recorded drill evidence:
+- `docs/operations/drills/runs/2026-07-21-capture-event-drill-run-001.md`
+- `docs/operations/drills/runs/2026-07-21-disputed-fork-drill-run-001.md`
+- `docs/operations/drills/runs/2026-07-21-verifier-compromise-drill-run-001.md`
+
+### Production-Network Stage
+
+Primary stage guide:
+- `docs/production/PRODUCTION_NETWORK_STAGE.md`
+
+Governance and incident policy artifacts:
+- `docs/governance/verifier-admission-removal-constitution.md`
+- `docs/governance/dispute-process.md`
+- `docs/governance/incident-postmortem-template.md`
+- `docs/governance/parameter-policy.md`
+
+Stress campaign tooling:
+- `ROUNDS=3000 npm run simulate:capture:sweep`
+- `OUT_FILE=analysis/capture-frontier.csv ROUNDS=3000 npm run simulate:capture:sweep`
+
+### Recommended Exit-Gate Flow
+
+1. Run adversarial + invariant suite:
+	- `npm run test:security`
+2. Verify maturity artifact completeness:
+	- `npm run check:maturity-artifacts`
+3. Execute full regression suite:
+	- `npm test`
+4. Fill security report + remediation log from test and review outputs.
+5. Run and record all three operations drills with named owners and completion timestamps.
+6. Publish production governance policy bundle and stress-envelope outputs.
+
 ## Project Status
 
 Research and formal specification phase.

@@ -4,12 +4,14 @@ import * as dotenv from "dotenv";
 
 dotenv.config();
 
+const isCoverageRun = process.env.COVERAGE === "true";
+
 const config: HardhatUserConfig = {
   solidity: {
     version: "0.8.24",
     settings: {
       optimizer: { enabled: true, runs: 200 },
-      evmVersion: "cancun",
+      evmVersion: isCoverageRun ? "paris" : "cancun",
       viaIR: true,
     },
   },

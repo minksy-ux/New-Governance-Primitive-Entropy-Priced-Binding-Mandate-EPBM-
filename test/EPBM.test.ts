@@ -28,12 +28,30 @@ async function signPersonhoodAttestation(
   expiry: bigint,
   nonce: bigint,
 ) {
-  const payloadHash = ethers.keccak256(
-    ethers.solidityPacked(
-      ["address", "uint256", "address", "uint256", "uint256", "uint256"],
-      [registryAddress, chainId, account, BigInt(score), expiry, nonce],
-    ),
-  );
+  const domain = {
+    name: "EPBM Personhood Registry",
+    version: "1",
+    chainId,
+    verifyingContract: registryAddress,
+  };
+
+  const types = {
+    PersonhoodScoreAttestation: [
+      { name: "account", type: "address" },
+      { name: "score", type: "uint256" },
+      { name: "expiry", type: "uint256" },
+      { name: "nonce", type: "uint256" },
+    ],
+  };
+
+  const value = {
+    account,
+    score: BigInt(score),
+    expiry,
+    nonce,
+  };
+
+  const payloadHash = ethers.TypedDataEncoder.hash(domain, types, value);
   return signer.signMessage(ethers.getBytes(payloadHash));
 }
 
@@ -733,6 +751,180 @@ describe("EPBM", function () {
       expect(updatedFork.active).to.equal(false);
     });
 
+    it("enforces branch-governor timelock queue for lifecycle actions when enabled", async function () {
+      const { epbm, forkRegistry, target, alice, bob, charlie, baseBond } = await deployFixture();
+
+      await proposeSimple(epbm, target, alice, baseBond);
+      await epbm.connect(alice).castVote(1n, 0);
+      await epbm.connect(bob).castVote(1n, 0);
+      await epbm.connect(charlie).castVote(1n, 1);
+      await fastForwardPastVoting(epbm);
+      await epbm.evaluate(1n);
+      await epbm.connect(charlie).registerForkIntent(1n);
+
+      const forkId = await epbm.forkIdByMandate(1n);
+      const fork = await forkRegistry.getFork(forkId);
+      const governor = await ethers.getContractAt("ForkBranchGovernor", fork.branchGovernor);
+
+      await governor.connect(charlie).setPrivilegedActionDelay(DAY);
+
+      await expect(governor.connect(charlie).finalizeForkBranch(forkId))
+        .to.be.revertedWithCustomError(governor, "ActionNotQueued");
+
+      const finalizeAction = await governor.actionIdFinalizeForkBranch(forkId);
+      await governor.connect(charlie).queuePrivilegedAction(finalizeAction);
+
+      await expect(governor.connect(charlie).finalizeForkBranch(forkId))
+        .to.be.revertedWithCustomError(governor, "ActionTimelockActive");
+
+      await time.increase(Number(DAY) + 1);
+      await governor.connect(charlie).finalizeForkBranch(forkId);
+
+      let updatedFork = await forkRegistry.getFork(forkId);
+      expect(updatedFork.lifecycleState).to.equal(1n); // FINALIZED
+
+      const resolveAction = await governor.actionIdResolveForkBranch(forkId, false);
+      await governor.connect(charlie).queuePrivilegedAction(resolveAction);
+      await time.increase(Number(DAY) + 1);
+      await governor.connect(charlie).resolveForkBranch(forkId, false);
+
+      updatedFork = await forkRegistry.getFork(forkId);
+      expect(updatedFork.lifecycleState).to.equal(3n); // RESOLVED
+      expect(updatedFork.active).to.equal(false);
+    });
+
+    it("enforces timelock queue for branch treasury withdrawals when enabled", async function () {
+      const { epbm, forkRegistry, target, alice, bob, charlie, baseBond, owner } = await deployFixture();
+
+      await proposeSimple(epbm, target, alice, baseBond);
+      await epbm.connect(alice).castVote(1n, 0);
+      await epbm.connect(bob).castVote(1n, 0);
+      await epbm.connect(charlie).castVote(1n, 1);
+      await fastForwardPastVoting(epbm);
+      await epbm.evaluate(1n);
+      await epbm.connect(charlie).registerForkIntent(1n);
+
+      const forkId = await epbm.forkIdByMandate(1n);
+      const fork = await forkRegistry.getFork(forkId);
+      const governor = await ethers.getContractAt("ForkBranchGovernor", fork.branchGovernor);
+
+      await owner.sendTransaction({ to: fork.branchGovernor, value: baseBond });
+      expect(await governor.treasuryBalance()).to.equal(baseBond);
+
+      await governor.connect(charlie).setPrivilegedActionDelay(DAY);
+
+      await expect(governor.connect(charlie).withdrawTreasury(owner.address, baseBond))
+        .to.be.revertedWithCustomError(governor, "ActionNotQueued");
+
+      const withdrawAction = await governor.actionIdWithdrawTreasury(owner.address, baseBond);
+      await governor.connect(charlie).queuePrivilegedAction(withdrawAction);
+
+      await expect(governor.connect(charlie).withdrawTreasury(owner.address, baseBond))
+        .to.be.revertedWithCustomError(governor, "ActionTimelockActive");
+
+      await time.increase(Number(DAY) + 1);
+      const before = await ethers.provider.getBalance(owner.address);
+      await governor.connect(charlie).withdrawTreasury(owner.address, baseBond);
+      const after = await ethers.provider.getBalance(owner.address);
+
+      expect(after - before).to.equal(baseBond);
+      expect(await governor.treasuryBalance()).to.equal(0n);
+    });
+
+    it("enforces timelock queue for branch updateConfig when enabled", async function () {
+      const { epbm, forkRegistry, target, alice, bob, charlie, baseBond } = await deployFixture();
+
+      await proposeSimple(epbm, target, alice, baseBond);
+      await epbm.connect(alice).castVote(1n, 0);
+      await epbm.connect(bob).castVote(1n, 0);
+      await epbm.connect(charlie).castVote(1n, 1);
+      await fastForwardPastVoting(epbm);
+      await epbm.evaluate(1n);
+      await epbm.connect(charlie).registerForkIntent(1n);
+
+      const forkId = await epbm.forkIdByMandate(1n);
+      const fork = await forkRegistry.getFork(forkId);
+      const governor = await ethers.getContractAt("ForkBranchGovernor", fork.branchGovernor);
+
+      await governor.connect(charlie).setPrivilegedActionDelay(DAY);
+
+      const newBaseBond = ethers.parseEther("0.2");
+      const bondEntropyFactor = await epbm.bondEntropyFactor();
+      const baseQuorumBPS = await epbm.baseQuorumBPS();
+      const quorumEntropyFactor = await epbm.quorumEntropyFactor();
+      const passageThresholdBPS = await epbm.passageThresholdBPS();
+      const passageEntropyFactor = await epbm.passageEntropyFactor();
+      const vetoThresholdBPS = await epbm.vetoThresholdBPS();
+      const forkActivationThresholdBPS = await epbm.forkActivationThresholdBPS();
+      const votingPeriod = await epbm.votingPeriod();
+      const executionWindow = await epbm.executionWindow();
+      const personhoodBoostFactor = await epbm.personhoodBoostFactor();
+
+      await expect(
+        governor.connect(charlie).updateConfig(
+          newBaseBond,
+          bondEntropyFactor,
+          baseQuorumBPS,
+          quorumEntropyFactor,
+          passageThresholdBPS,
+          passageEntropyFactor,
+          vetoThresholdBPS,
+          forkActivationThresholdBPS,
+          votingPeriod,
+          executionWindow,
+          personhoodBoostFactor,
+        ),
+      ).to.be.revertedWithCustomError(governor, "ActionNotQueued");
+
+      const configAction = await governor.actionIdUpdateConfig(
+        newBaseBond,
+        bondEntropyFactor,
+        baseQuorumBPS,
+        quorumEntropyFactor,
+        passageThresholdBPS,
+        passageEntropyFactor,
+        vetoThresholdBPS,
+        forkActivationThresholdBPS,
+        votingPeriod,
+        executionWindow,
+        personhoodBoostFactor,
+      );
+      await governor.connect(charlie).queuePrivilegedAction(configAction);
+
+      await expect(
+        governor.connect(charlie).updateConfig(
+          newBaseBond,
+          bondEntropyFactor,
+          baseQuorumBPS,
+          quorumEntropyFactor,
+          passageThresholdBPS,
+          passageEntropyFactor,
+          vetoThresholdBPS,
+          forkActivationThresholdBPS,
+          votingPeriod,
+          executionWindow,
+          personhoodBoostFactor,
+        ),
+      ).to.be.revertedWithCustomError(governor, "ActionTimelockActive");
+
+      await time.increase(Number(DAY) + 1);
+      await governor.connect(charlie).updateConfig(
+        newBaseBond,
+        bondEntropyFactor,
+        baseQuorumBPS,
+        quorumEntropyFactor,
+        passageThresholdBPS,
+        passageEntropyFactor,
+        vetoThresholdBPS,
+        forkActivationThresholdBPS,
+        votingPeriod,
+        executionWindow,
+        personhoodBoostFactor,
+      );
+
+      expect(await epbm.baseBond()).to.equal(newBaseBond);
+    });
+
     it("reverts for YES voters", async function () {
       const { epbm, target, alice, bob, baseBond } = await deployFixture();
 
@@ -898,6 +1090,42 @@ describe("EPBM", function () {
         ),
       ).to.be.revertedWithCustomError(epbm, "NotGovernance");
     });
+
+    it("reverts when config exceeds safety-envelope bounds", async function () {
+      const { epbm, owner } = await deployFixture();
+
+      await expect(
+        epbm.connect(owner).updateConfig(
+          ethers.parseEther("0.2"),
+          6n * WAD,
+          1000n,
+          2000n,
+          5000n,
+          1000n,
+          2000n,
+          1000n,
+          WEEK,
+          2n * DAY,
+          WAD,
+        ),
+      ).to.be.revertedWith("bond entropy factor too high");
+
+      await expect(
+        epbm.connect(owner).updateConfig(
+          ethers.parseEther("0.2"),
+          2n * WAD,
+          1000n,
+          2000n,
+          5000n,
+          1000n,
+          2000n,
+          1000n,
+          DAY / 2n,
+          2n * DAY,
+          WAD,
+        ),
+      ).to.be.revertedWith("voting period too short");
+    });
   });
 
   describe("governance transfer safeguards", function () {
@@ -913,6 +1141,78 @@ describe("EPBM", function () {
       await time.increase(Number(DAY) + 1);
       await epbm.connect(alice).acceptGovernanceTransfer();
       expect(await epbm.governance()).to.equal(alice.address);
+    });
+
+    it("can finalize mutable governance surface and block further parameter mutation", async function () {
+      const { epbm, owner, target, alice } = await deployFixture();
+
+      await epbm.connect(owner).setGovernanceTransferDelay(DAY);
+      await epbm.connect(owner).finalizeProtocolSurface();
+      expect(await epbm.protocolSurfaceFinalized()).to.equal(true);
+
+      await expect(epbm.connect(owner).setScopeTarget(scopeId("x"), target.target as string, true))
+        .to.be.revertedWithCustomError(epbm, "ProtocolSurfaceFinalized");
+      await expect(epbm.connect(owner).setForkRegistry(ethers.ZeroAddress))
+        .to.be.revertedWithCustomError(epbm, "ProtocolSurfaceFinalized");
+      await expect(epbm.connect(owner).registerTreasuryAsset(alice.address))
+        .to.be.revertedWithCustomError(epbm, "ProtocolSurfaceFinalized");
+      await expect(epbm.connect(owner).setGovernanceTransferDelay(DAY))
+        .to.be.revertedWithCustomError(epbm, "ProtocolSurfaceFinalized");
+      await expect(
+        epbm.connect(owner).updateConfig(
+          ethers.parseEther("0.2"),
+          2n * WAD,
+          1000n,
+          2000n,
+          5000n,
+          1000n,
+          2000n,
+          1000n,
+          WEEK,
+          2n * DAY,
+          WAD,
+        ),
+      ).to.be.revertedWithCustomError(epbm, "ProtocolSurfaceFinalized");
+    });
+
+    it("requires protocol-surface finalization readiness checklist", async function () {
+      const { epbm, owner, alice } = await deployFixture();
+
+      await expect(epbm.connect(owner).finalizeProtocolSurface())
+        .to.be.revertedWithCustomError(epbm, "SurfaceFinalizationDelayTooShort");
+
+      await epbm.connect(owner).setGovernanceTransferDelay(DAY);
+      await epbm.connect(owner).initiateGovernanceTransfer(alice.address);
+
+      await expect(epbm.connect(owner).finalizeProtocolSurface())
+        .to.be.revertedWithCustomError(epbm, "SurfaceFinalizationPendingGovernanceExists");
+    });
+
+    it("exposes protocol-surface finalization preflight in one call", async function () {
+      const { epbm, owner, alice } = await deployFixture();
+
+      let status = await epbm.protocolSurfaceFinalizationReadiness();
+      expect(status.ready).to.equal(false);
+      expect(status.hasForkRegistry).to.equal(true);
+      expect(status.hasNoPendingGovernance).to.equal(true);
+      expect(status.currentGovernanceTransferDelay).to.equal(0n);
+      expect(status.enoughGovernanceTransferDelay).to.equal(false);
+
+      await epbm.connect(owner).setGovernanceTransferDelay(DAY);
+      status = await epbm.protocolSurfaceFinalizationReadiness();
+      expect(status.ready).to.equal(true);
+      expect(status.hasForkRegistry).to.equal(true);
+      expect(status.hasNoPendingGovernance).to.equal(true);
+      expect(status.currentGovernanceTransferDelay).to.equal(DAY);
+      expect(status.enoughGovernanceTransferDelay).to.equal(true);
+
+      await epbm.connect(owner).initiateGovernanceTransfer(alice.address);
+      status = await epbm.protocolSurfaceFinalizationReadiness();
+      expect(status.ready).to.equal(false);
+      expect(status.hasForkRegistry).to.equal(true);
+      expect(status.hasNoPendingGovernance).to.equal(false);
+      expect(status.currentGovernanceTransferDelay).to.equal(DAY);
+      expect(status.enoughGovernanceTransferDelay).to.equal(true);
     });
   });
 
@@ -984,6 +1284,212 @@ describe("EPBM", function () {
 
       await expect(
         registry.setScoreByAttestation(bob.address, 88, expiry, nonce, signature),
+      ).to.be.revertedWithCustomError(registry, "InvalidAttestation");
+    });
+
+    it("supports multiple active verifier keys", async function () {
+      const { registry, owner, bob, alice } = await deployFixture();
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+
+      await registry.connect(owner).setVerifierStatus(alice.address, true);
+      expect(await registry.activeVerifierCount()).to.equal(2n);
+
+      const expiry = BigInt((await time.latest()) + 3600);
+      const nonce = 7n;
+      const signature = await signPersonhoodAttestation(
+        registry.target as string,
+        chainId,
+        alice,
+        bob.address,
+        66,
+        expiry,
+        nonce,
+      );
+
+      await registry.setScoreByAttestation(bob.address, 66, expiry, nonce, signature);
+      expect(await registry.scoreOf(bob.address)).to.equal(66n);
+    });
+
+    it("can irreversibly disable direct admin score writes", async function () {
+      const { registry, owner, bob } = await deployFixture();
+
+      await registry.connect(owner).disableManualScoreWrites();
+      expect(await registry.manualScoreWritesDisabled()).to.equal(true);
+
+      await expect(registry.connect(owner).setScore(bob.address, 80))
+        .to.be.revertedWithCustomError(registry, "ManualScoreWritesDisabledError");
+
+      await expect(registry.connect(owner).setScores([bob.address], [80]))
+        .to.be.revertedWithCustomError(registry, "ManualScoreWritesDisabledError");
+    });
+
+    it("can finalize decentralization and permanently freeze admin/verifier mutations", async function () {
+      const { registry, owner, alice, bob } = await deployFixture();
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+
+      await registry.connect(owner).setVerifierStatus(alice.address, true);
+      await registry.connect(owner).disableManualScoreWrites();
+      await registry.connect(owner).finalizeDecentralization();
+
+      expect(await registry.decentralizationFinalized()).to.equal(true);
+      expect(await registry.manualScoreWritesDisabled()).to.equal(true);
+      expect(await registry.pendingAdmin()).to.equal(ethers.ZeroAddress);
+
+      await expect(registry.connect(owner).setVerifierStatus(bob.address, true))
+        .to.be.revertedWithCustomError(registry, "RegistryFrozen");
+      await expect(registry.connect(owner).setVerifier(bob.address))
+        .to.be.revertedWithCustomError(registry, "RegistryFrozen");
+      await expect(registry.connect(owner).disableManualScoreWrites())
+        .to.be.revertedWithCustomError(registry, "RegistryFrozen");
+      await expect(registry.connect(owner).initiateAdminTransfer(alice.address))
+        .to.be.revertedWithCustomError(registry, "RegistryFrozen");
+      await expect(registry.connect(owner).setScore(bob.address, 10))
+        .to.be.revertedWithCustomError(registry, "RegistryFrozen");
+
+      const expiry = BigInt((await time.latest()) + 3600);
+      const nonce = 13n;
+      const signature = await signPersonhoodAttestation(
+        registry.target as string,
+        chainId,
+        alice,
+        bob.address,
+        61,
+        expiry,
+        nonce,
+      );
+
+      await registry.setScoreByAttestation(bob.address, 61, expiry, nonce, signature);
+      expect(await registry.scoreOf(bob.address)).to.equal(61n);
+    });
+
+    it("requires finalization readiness checklist before decentralization freeze", async function () {
+      const { registry, owner, alice } = await deployFixture();
+
+      await expect(registry.connect(owner).finalizeDecentralization())
+        .to.be.revertedWithCustomError(registry, "FinalizationManualWritesNotDisabled");
+
+      await registry.connect(owner).disableManualScoreWrites();
+      await expect(registry.connect(owner).finalizeDecentralization())
+        .to.be.revertedWithCustomError(registry, "FinalizationInsufficientVerifiers");
+
+      await registry.connect(owner).queueVerifierStatusChange(alice.address, true);
+      await time.increase(Number(DAY) + 1);
+      await registry.connect(owner).setVerifierStatus(alice.address, true);
+      await registry.connect(owner).initiateAdminTransfer(alice.address);
+      await expect(registry.connect(owner).finalizeDecentralization())
+        .to.be.revertedWithCustomError(registry, "FinalizationPendingAdminExists");
+    });
+
+    it("prevents verifier set from dropping below safety floor after manual writes are disabled", async function () {
+      const { registry, owner, alice } = await deployFixture();
+
+      await registry.connect(owner).setVerifierStatus(alice.address, true);
+      await registry.connect(owner).disableManualScoreWrites();
+
+      await registry.connect(owner).queueVerifierStatusChange(alice.address, false);
+      await time.increase(Number(DAY) + 1);
+
+      await expect(registry.connect(owner).setVerifierStatus(alice.address, false))
+        .to.be.revertedWithCustomError(registry, "VerifierSafetyFloorBreached");
+    });
+
+    it("requires queued and delayed verifier-status changes after manual writes are disabled", async function () {
+      const { registry, owner, alice } = await deployFixture();
+
+      await registry.connect(owner).disableManualScoreWrites();
+
+      await expect(registry.connect(owner).setVerifierStatus(alice.address, true))
+        .to.be.revertedWithCustomError(registry, "VerifierChangeNotQueued");
+
+      await registry.connect(owner).queueVerifierStatusChange(alice.address, true);
+      await expect(registry.connect(owner).setVerifierStatus(alice.address, true))
+        .to.be.revertedWithCustomError(registry, "VerifierChangeTimelockActive");
+
+      await time.increase(Number(DAY) + 1);
+      await registry.connect(owner).setVerifierStatus(alice.address, true);
+      expect(await registry.isVerifier(alice.address)).to.equal(true);
+    });
+
+    it("exposes finalization readiness preflight in one call", async function () {
+      const { registry, owner, alice } = await deployFixture();
+
+      let status = await registry.finalizationReadiness();
+      expect(status.ready).to.equal(false);
+      expect(status.manualWritesDisabled).to.equal(false);
+      expect(status.hasNoPendingAdmin).to.equal(true);
+      expect(status.verifierCount).to.equal(1n);
+      expect(status.enoughVerifiers).to.equal(false);
+
+      await registry.connect(owner).disableManualScoreWrites();
+      status = await registry.finalizationReadiness();
+      expect(status.ready).to.equal(false);
+      expect(status.manualWritesDisabled).to.equal(true);
+      expect(status.hasNoPendingAdmin).to.equal(true);
+      expect(status.verifierCount).to.equal(1n);
+      expect(status.enoughVerifiers).to.equal(false);
+
+      await registry.connect(owner).queueVerifierStatusChange(alice.address, true);
+      await time.increase(Number(DAY) + 1);
+      await registry.connect(owner).setVerifierStatus(alice.address, true);
+      status = await registry.finalizationReadiness();
+      expect(status.ready).to.equal(true);
+      expect(status.manualWritesDisabled).to.equal(true);
+      expect(status.hasNoPendingAdmin).to.equal(true);
+      expect(status.verifierCount).to.equal(2n);
+      expect(status.enoughVerifiers).to.equal(true);
+
+      await registry.connect(owner).initiateAdminTransfer(alice.address);
+      status = await registry.finalizationReadiness();
+      expect(status.ready).to.equal(false);
+      expect(status.manualWritesDisabled).to.equal(true);
+      expect(status.hasNoPendingAdmin).to.equal(false);
+      expect(status.verifierCount).to.equal(2n);
+      expect(status.enoughVerifiers).to.equal(true);
+    });
+
+    it("rejects attestations signed for a different registry domain", async function () {
+      const { registry, owner, bob } = await deployFixture();
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+
+      const Registry = await ethers.getContractFactory("PersonhoodRegistry");
+      const otherRegistry = (await Registry.deploy(owner.address)) as unknown as PersonhoodRegistry;
+
+      const expiry = BigInt((await time.latest()) + 3600);
+      const nonce = 9n;
+      const signature = await signPersonhoodAttestation(
+        otherRegistry.target as string,
+        chainId,
+        owner,
+        bob.address,
+        77,
+        expiry,
+        nonce,
+      );
+
+      await expect(
+        registry.setScoreByAttestation(bob.address, 77, expiry, nonce, signature),
+      ).to.be.revertedWithCustomError(registry, "InvalidAttestation");
+    });
+
+    it("rejects attestations signed for a different chain domain", async function () {
+      const { registry, owner, bob } = await deployFixture();
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+
+      const expiry = BigInt((await time.latest()) + 3600);
+      const nonce = 11n;
+      const wrongChainId = chainId + 1n;
+      const signature = await signPersonhoodAttestation(
+        registry.target as string,
+        wrongChainId,
+        owner,
+        bob.address,
+        79,
+        expiry,
+        nonce,
+      );
+
+      await expect(
+        registry.setScoreByAttestation(bob.address, 79, expiry, nonce, signature),
       ).to.be.revertedWithCustomError(registry, "InvalidAttestation");
     });
   });

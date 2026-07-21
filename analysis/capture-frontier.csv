@@ -1,0 +1,2 @@
+baseQuorumBps,quorumEntropyFactorBps,passageThresholdBps,passageEntropyFactorBps,vetoThresholdBps,rounds,passed,defeated,vetoed,cartelWon,minorityVetoed,passRate,vetoRate,cartelWinRate,minorityVetoRate
+1000,2000,5000,1000,2000,50,31,8,11,20,3,0.6200,0.2200,0.4000,0.0600

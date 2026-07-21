@@ -61,6 +61,13 @@ contract EPBM is IEPBM {
 
     uint256 public constant WAD = 1e18;
     uint256 public constant BPS_DENOM = 10_000;
+    uint256 public constant MAX_BOND_ENTROPY_FACTOR = 5e18;
+    uint256 public constant MAX_QUORUM_ENTROPY_FACTOR_BPS = 5_000;
+    uint256 public constant MAX_PASSAGE_ENTROPY_FACTOR_BPS = 3_000;
+    uint256 public constant MIN_VOTING_PERIOD = 1 days;
+    uint256 public constant MAX_VOTING_PERIOD = 30 days;
+    uint256 public constant MIN_EXECUTION_WINDOW = 1 days;
+    uint256 public constant MAX_EXECUTION_WINDOW = 14 days;
 
     /// @notice Number of past mandates used to compute historical entropy.
     uint256 public constant ENTROPY_WINDOW = 8;
@@ -126,6 +133,8 @@ contract EPBM is IEPBM {
     uint256 public pendingGovernanceNonce;
     uint256 public governanceTransferNonce;
     uint256 public governanceTransferDelay;
+    bool public protocolSurfaceFinalized;
+    uint256 public constant MIN_GOVERNANCE_TRANSFER_DELAY_FOR_FINALIZATION = 1 days;
 
     /// @notice Allowed execution targets per scope.
     mapping(bytes32 => mapping(address => bool)) public scopeTargetAllowed;
@@ -151,6 +160,10 @@ contract EPBM is IEPBM {
     error GovernanceTransferPending(address pendingGovernance);
     error TreasuryAssetAlreadyRegistered(address asset);
     error TreasuryAssetTransferFailed(address asset, uint256 amount);
+    error ProtocolSurfaceFinalized();
+    error SurfaceFinalizationForkRegistryUnset();
+    error SurfaceFinalizationPendingGovernanceExists(address pendingGovernance);
+    error SurfaceFinalizationDelayTooShort(uint256 governanceTransferDelay, uint256 minimumDelay);
 
     // ─────────────────────────────────────────────────────────────────────────
     // Entropy history ring-buffer
@@ -219,6 +232,20 @@ contract EPBM is IEPBM {
         votingPeriod          = _votingPeriod;
         executionWindow       = _executionWindow;
         personhoodBoostFactor = _personhoodBoostFactor;
+
+        _validateConfig(
+            _baseBond,
+            _bondEntropyFactor,
+            _baseQuorumBPS,
+            _quorumEntropyFactor,
+            _passageThresholdBPS,
+            _passageEntropyFactor,
+            _vetoThresholdBPS,
+            _forkActivationThresholdBPS,
+            _votingPeriod,
+            _executionWindow,
+            _personhoodBoostFactor
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -474,47 +501,7 @@ contract EPBM is IEPBM {
 
         uint256 thresholdWeight = (m.totalEligibleWeight * forkActivationThresholdBPS) / BPS_DENOM;
         if (thresholdWeight > 0 && forkIntentWeight[mandateId] >= thresholdWeight) {
-            m.state = MandateState.FORKED;
-            if (address(forkRegistry) == address(0)) revert ForkRegistryNotSet();
-            uint256 forkTreasury = slashedBondPool;
-            slashedBondPool = 0;
-
-            (uint256 forkId, address branchGovernor) = forkRegistry.createFork(
-                mandateId,
-                m.proposer,
-                msg.sender,
-                m.scope,
-                address(token),
-                address(personhoodRegistry),
-                governance,
-                forkTreasury,
-                _forkSupporters[mandateId],
-                _forkSupporterWeights(mandateId),
-                forkIntentWeight[mandateId],
-                thresholdWeight
-            );
-            forkIdByMandate[mandateId] = forkId;
-
-            governance = branchGovernor;
-            pendingGovernance = address(0);
-            pendingGovernanceEta = 0;
-            pendingGovernanceNonce = 0;
-
-            if (forkTreasury > 0) {
-                (bool ok,) = payable(branchGovernor).call{value: forkTreasury}("");
-                require(ok, "Fork treasury transfer failed");
-            }
-
-            for (uint256 i = 0; i < _treasuryAssets.length; i++) {
-                address asset = _treasuryAssets[i];
-                uint256 balance = IERC20Minimal(asset).balanceOf(address(this));
-                if (balance == 0) continue;
-                bool ok = IERC20Minimal(asset).transfer(branchGovernor, balance);
-                if (!ok) revert TreasuryAssetTransferFailed(asset, balance);
-            }
-
-            _queueBondReturn(m);
-            emit MandateForked(mandateId, forkIntentWeight[mandateId], thresholdWeight);
+            _activateFork(m, mandateId, msg.sender, thresholdWeight);
         }
     }
 
@@ -532,18 +519,18 @@ contract EPBM is IEPBM {
     }
 
     /// @notice Allow or disallow a target for a given scope.
-    function setScopeTarget(bytes32 scope, address target, bool allowed) external onlyGovernance {
+    function setScopeTarget(bytes32 scope, address target, bool allowed) external onlyGovernanceMutable {
         scopeTargetAllowed[scope][target] = allowed;
         emit ScopeTargetUpdated(scope, target, allowed);
     }
 
     /// @notice Set or update the fork registry used to record concrete branches.
-    function setForkRegistry(address _forkRegistry) external onlyGovernance {
+    function setForkRegistry(address _forkRegistry) external onlyGovernanceMutable {
         forkRegistry = IForkRegistry(_forkRegistry);
     }
 
     /// @notice Register a treasury ERC20 asset that should migrate on fork.
-    function registerTreasuryAsset(address asset) external onlyGovernance {
+    function registerTreasuryAsset(address asset) external onlyGovernanceMutable {
         if (isTreasuryAsset[asset]) revert TreasuryAssetAlreadyRegistered(asset);
         isTreasuryAsset[asset] = true;
         _treasuryAssets.push(asset);
@@ -573,6 +560,12 @@ contract EPBM is IEPBM {
         _;
     }
 
+    modifier onlyGovernanceMutable() {
+        if (msg.sender != governance) revert NotGovernance();
+        if (protocolSurfaceFinalized) revert ProtocolSurfaceFinalized();
+        _;
+    }
+
     /// @notice Two-step governance transfer — initiate phase.
     function initiateGovernanceTransfer(address newGovernance) external onlyGovernance {
         if (pendingGovernance != address(0)) revert GovernanceTransferPending(pendingGovernance);
@@ -592,8 +585,43 @@ contract EPBM is IEPBM {
     }
 
     /// @notice Configure governance handoff delay.
-    function setGovernanceTransferDelay(uint256 delaySeconds) external onlyGovernance {
+    function setGovernanceTransferDelay(uint256 delaySeconds) external onlyGovernanceMutable {
         governanceTransferDelay = delaySeconds;
+    }
+
+    /// @notice Irreversibly finalize mutable governance surface for protocol simplicity.
+    function finalizeProtocolSurface() external onlyGovernanceMutable {
+        if (address(forkRegistry) == address(0)) revert SurfaceFinalizationForkRegistryUnset();
+        if (pendingGovernance != address(0)) {
+            revert SurfaceFinalizationPendingGovernanceExists(pendingGovernance);
+        }
+        if (governanceTransferDelay < MIN_GOVERNANCE_TRANSFER_DELAY_FOR_FINALIZATION) {
+            revert SurfaceFinalizationDelayTooShort(
+                governanceTransferDelay,
+                MIN_GOVERNANCE_TRANSFER_DELAY_FOR_FINALIZATION
+            );
+        }
+        protocolSurfaceFinalized = true;
+    }
+
+    /// @notice One-call preflight status for protocol-surface finalization.
+    function protocolSurfaceFinalizationReadiness()
+        external
+        view
+        returns (
+            bool ready,
+            bool hasForkRegistry,
+            bool hasNoPendingGovernance,
+            uint256 currentGovernanceTransferDelay,
+            bool enoughGovernanceTransferDelay
+        )
+    {
+        hasForkRegistry = address(forkRegistry) != address(0);
+        hasNoPendingGovernance = pendingGovernance == address(0);
+        currentGovernanceTransferDelay = governanceTransferDelay;
+        enoughGovernanceTransferDelay =
+            currentGovernanceTransferDelay >= MIN_GOVERNANCE_TRANSFER_DELAY_FOR_FINALIZATION;
+        ready = hasForkRegistry && hasNoPendingGovernance && enoughGovernanceTransferDelay;
     }
 
     /// @notice Withdraw accumulated slashed bonds to a treasury address.
@@ -619,11 +647,20 @@ contract EPBM is IEPBM {
         uint256 _votingPeriod,
         uint256 _executionWindow,
         uint256 _personhoodBoostFactor
-    ) external onlyGovernance {
-        require(_baseQuorumBPS       <= BPS_DENOM, "quorum > 100%");
-        require(_passageThresholdBPS <= BPS_DENOM, "passage > 100%");
-        require(_vetoThresholdBPS    <= BPS_DENOM, "veto > 100%");
-        require(_forkActivationThresholdBPS <= BPS_DENOM, "fork > 100%");
+    ) external onlyGovernanceMutable {
+        _validateConfig(
+            _baseBond,
+            _bondEntropyFactor,
+            _baseQuorumBPS,
+            _quorumEntropyFactor,
+            _passageThresholdBPS,
+            _passageEntropyFactor,
+            _vetoThresholdBPS,
+            _forkActivationThresholdBPS,
+            _votingPeriod,
+            _executionWindow,
+            _personhoodBoostFactor
+        );
 
         baseBond              = _baseBond;
         bondEntropyFactor     = _bondEntropyFactor;
@@ -724,6 +761,37 @@ contract EPBM is IEPBM {
         return sum / count;
     }
 
+    function _validateConfig(
+        uint256 _baseBond,
+        uint256 _bondEntropyFactor,
+        uint256 _baseQuorumBPS,
+        uint256 _quorumEntropyFactor,
+        uint256 _passageThresholdBPS,
+        uint256 _passageEntropyFactor,
+        uint256 _vetoThresholdBPS,
+        uint256 _forkActivationThresholdBPS,
+        uint256 _votingPeriod,
+        uint256 _executionWindow,
+        uint256 _personhoodBoostFactor
+    ) internal pure {
+        _baseBond;
+        _personhoodBoostFactor;
+
+        require(_baseQuorumBPS <= BPS_DENOM, "quorum > 100%");
+        require(_passageThresholdBPS <= BPS_DENOM, "passage > 100%");
+        require(_vetoThresholdBPS <= BPS_DENOM, "veto > 100%");
+        require(_forkActivationThresholdBPS <= BPS_DENOM, "fork > 100%");
+
+        require(_bondEntropyFactor <= MAX_BOND_ENTROPY_FACTOR, "bond entropy factor too high");
+        require(_quorumEntropyFactor <= MAX_QUORUM_ENTROPY_FACTOR_BPS, "quorum entropy factor too high");
+        require(_passageEntropyFactor <= MAX_PASSAGE_ENTROPY_FACTOR_BPS, "passage entropy factor too high");
+
+        require(_votingPeriod >= MIN_VOTING_PERIOD, "voting period too short");
+        require(_votingPeriod <= MAX_VOTING_PERIOD, "voting period too long");
+        require(_executionWindow >= MIN_EXECUTION_WINDOW, "execution window too short");
+        require(_executionWindow <= MAX_EXECUTION_WINDOW, "execution window too long");
+    }
+
     /// @dev Queue a bond return for the proposer (pull-payment pattern).
     function _queueBondReturn(Mandate storage m) internal {
         uint256 bond = m.bondAmount;
@@ -731,6 +799,63 @@ contract EPBM is IEPBM {
         m.bondAmount = 0;
         claimableBonds[m.proposer] += bond;
         emit BondReturned(m.id, m.proposer, bond);
+    }
+
+    function _activateFork(
+        Mandate storage m,
+        uint256 mandateId,
+        address activator,
+        uint256 thresholdWeight
+    ) internal {
+        m.state = MandateState.FORKED;
+        if (address(forkRegistry) == address(0)) revert ForkRegistryNotSet();
+
+        uint256 forkTreasury = slashedBondPool;
+        slashedBondPool = 0;
+
+        (uint256 forkId, address branchGovernor) = forkRegistry.createFork(
+            mandateId,
+            m.proposer,
+            activator,
+            m.scope,
+            address(token),
+            address(personhoodRegistry),
+            governance,
+            forkTreasury,
+            _forkSupporters[mandateId],
+            _forkSupporterWeights(mandateId),
+            forkIntentWeight[mandateId],
+            thresholdWeight
+        );
+        forkIdByMandate[mandateId] = forkId;
+
+        _handoffGovernanceToBranch(branchGovernor);
+        _migrateTreasury(branchGovernor, forkTreasury);
+
+        _queueBondReturn(m);
+        emit MandateForked(mandateId, forkIntentWeight[mandateId], thresholdWeight);
+    }
+
+    function _handoffGovernanceToBranch(address branchGovernor) internal {
+        governance = branchGovernor;
+        pendingGovernance = address(0);
+        pendingGovernanceEta = 0;
+        pendingGovernanceNonce = 0;
+    }
+
+    function _migrateTreasury(address branchGovernor, uint256 forkTreasury) internal {
+        if (forkTreasury > 0) {
+            (bool ok,) = payable(branchGovernor).call{value: forkTreasury}("");
+            require(ok, "Fork treasury transfer failed");
+        }
+
+        for (uint256 i = 0; i < _treasuryAssets.length; i++) {
+            address asset = _treasuryAssets[i];
+            uint256 balance = IERC20Minimal(asset).balanceOf(address(this));
+            if (balance == 0) continue;
+            bool ok = IERC20Minimal(asset).transfer(branchGovernor, balance);
+            if (!ok) revert TreasuryAssetTransferFailed(asset, balance);
+        }
     }
 
     function _forkSupporterWeights(uint256 mandateId) internal view returns (uint256[] memory weights) {
