@@ -1,0 +1,112 @@
+{
+  "version": "1.0",
+  "entries": [
+    {
+      "invariantId": "INV-001",
+      "title": "Treasury Conservation",
+      "testFiles": [
+        "test/EPBM.invariants.test.ts"
+      ],
+      "proofMarkers": [
+        "conserves bond accounting across randomized outcome sequences"
+      ],
+      "artifacts": [
+        "docs/security/FORMAL_INVARIANTS_SPEC.md"
+      ]
+    },
+    {
+      "invariantId": "INV-002",
+      "title": "Single-Claim Safety",
+      "testFiles": [
+        "test/EPBM.invariants.test.ts"
+      ],
+      "proofMarkers": [
+        "prevents double bond claims under repeated claim attempts"
+      ],
+      "artifacts": [
+        "docs/security/FORMAL_INVARIANTS_SPEC.md"
+      ]
+    },
+    {
+      "invariantId": "INV-003",
+      "title": "Mandate State Monotonicity",
+      "testFiles": [
+        "test/EPBM.test.ts"
+      ],
+      "proofMarkers": [
+        "reverts if mandate is not PASSED"
+      ],
+      "artifacts": [
+        "docs/security/FORMAL_INVARIANTS_SPEC.md"
+      ]
+    },
+    {
+      "invariantId": "INV-004",
+      "title": "Branch State Monotonicity",
+      "testFiles": [
+        "test/EPBM.test.ts"
+      ],
+      "proofMarkers": [
+        "supports fork lifecycle transitions finalize and resolve"
+      ],
+      "artifacts": [
+        "docs/security/FORMAL_INVARIANTS_SPEC.md"
+      ]
+    },
+    {
+      "invariantId": "INV-005",
+      "title": "Governance Transfer Correctness",
+      "testFiles": [
+        "test/EPBM.invariants.test.ts"
+      ],
+      "proofMarkers": [
+        "enforces monotonic governance transfer state transitions"
+      ],
+      "artifacts": [
+        "docs/security/FORMAL_INVARIANTS_SPEC.md"
+      ]
+    },
+    {
+      "invariantId": "INV-006",
+      "title": "Replay Resistance",
+      "testFiles": [
+        "test/EPBM.test.ts"
+      ],
+      "proofMarkers": [
+        "accepts verifier-signed personhood attestations with replay protection",
+        "rejects attestations signed for a different chain domain"
+      ],
+      "artifacts": [
+        "docs/security/FORMAL_INVARIANTS_SPEC.md"
+      ]
+    },
+    {
+      "invariantId": "INV-007",
+      "title": "Freeze Irreversibility",
+      "testFiles": [
+        "test/EPBM.test.ts",
+        "test/EPBM.adversarial.test.ts"
+      ],
+      "proofMarkers": [
+        "can finalize mutable governance surface and block further parameter mutation",
+        "keeps settlement paths available after protocol-surface freeze while blocking governance mutation"
+      ],
+      "artifacts": [
+        "docs/security/FORMAL_INVARIANTS_SPEC.md"
+      ]
+    },
+    {
+      "invariantId": "INV-008",
+      "title": "Verifier Governance Safety Floor",
+      "testFiles": [
+        "test/EPBM.test.ts"
+      ],
+      "proofMarkers": [
+        "prevents verifier set from dropping below safety floor after manual writes are disabled"
+      ],
+      "artifacts": [
+        "docs/security/FORMAL_INVARIANTS_SPEC.md"
+      ]
+    }
+  ]
+}

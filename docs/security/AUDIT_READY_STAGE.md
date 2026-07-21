@@ -27,8 +27,14 @@ Move from strong engineering to third-party security confidence.
 4. Formal invariant specification
 - Canonical invariant set in [FORMAL_INVARIANTS_SPEC.md](FORMAL_INVARIANTS_SPEC.md).
 - Mapping from each invariant to test coverage and evidence artifact.
+- Machine-checkable matrix in [formal-evidence-matrix.json](formal-evidence-matrix.json).
+- Gate command: `npm run check:formal-evidence`.
 
-5. Operational drill evidence
+5. Verifier governance transparency
+- Export governance event history for personhood verifier changes.
+- Command: `npm run export:verifier-history -- --registry <registryAddress> --from-block <start>`
+
+6. Operational drill evidence
 - Capture drill: [capture-event-drill.md](../operations/drills/capture-event-drill.md)
 - Disputed fork drill: [disputed-fork-drill.md](../operations/drills/disputed-fork-drill.md)
 - Verifier compromise drill: [verifier-compromise-drill.md](../operations/drills/verifier-compromise-drill.md)
@@ -49,5 +55,7 @@ Move from strong engineering to third-party security confidence.
 - [ ] All critical/high issues closed
 - [ ] Remediation log complete with references
 - [ ] Formal invariant evidence linked
+- [ ] Formal evidence matrix gate passing
+- [ ] Verifier governance history exported and published
 - [ ] Drill evidence attached and signed off
 - [ ] Final readiness review approved

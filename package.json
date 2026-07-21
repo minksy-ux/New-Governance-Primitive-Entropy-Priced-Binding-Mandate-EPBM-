@@ -11,8 +11,11 @@
     "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
     "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia",
     "check:maturity-artifacts": "hardhat run scripts/check-maturity-artifacts.ts",
+    "check:formal-evidence": "hardhat run scripts/check-formal-evidence.ts",
     "check:finalization-readiness": "hardhat run scripts/check-finalization-readiness.ts",
     "check:finalization-readiness:local": "hardhat run scripts/check-finalization-readiness.ts --network localhost",
+    "export:verifier-history": "hardhat run scripts/export-verifier-governance-history.ts",
+    "export:fork-legitimacy": "hardhat run scripts/export-fork-legitimacy-report.ts",
     "simulate:capture": "hardhat run scripts/simulate-capture.ts",
     "simulate:capture:sweep": "hardhat run scripts/sweep-capture.ts"
   },

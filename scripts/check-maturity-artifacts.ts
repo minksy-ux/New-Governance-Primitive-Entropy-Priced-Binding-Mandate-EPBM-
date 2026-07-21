@@ -7,12 +7,16 @@ const requiredFiles = [
   "docs/security/remediation-log.csv",
   "docs/production/PRODUCTION_NETWORK_STAGE.md",
   "docs/governance/verifier-admission-removal-constitution.md",
+  "docs/governance/fork-legitimacy-transparency-standard.md",
   "docs/governance/dispute-process.md",
   "docs/governance/incident-postmortem-template.md",
   "docs/governance/parameter-policy.md",
+  "docs/operations/public-drill-program.md",
+  "docs/operations/drills/runs/WITNESS_ATTESTATION_TEMPLATE.md",
   "docs/operations/drills/capture-event-drill.md",
   "docs/operations/drills/disputed-fork-drill.md",
   "docs/operations/drills/verifier-compromise-drill.md",
+  "docs/security/formal-evidence-matrix.json",
 ];
 
 const runDir = "docs/operations/drills/runs";
@@ -49,7 +53,8 @@ function main() {
       }),
   );
 
-  const runFiles = runFileNames.map((name) => `${runDir}/${name}`);
+  const runEvidenceFiles = runFileNames.filter((name) => name !== "WITNESS_ATTESTATION_TEMPLATE.md");
+  const runFiles = runEvidenceFiles.map((name) => `${runDir}/${name}`);
   const runFilesMissingEvidence = runFiles.filter((path) => !hasRequiredSection(path, "## Evidence"));
 
   if (missingOrEmpty.length > 0 || !runDirExists || missingRunKinds.length > 0 || runFilesMissingEvidence.length > 0) {

@@ -37,6 +37,9 @@ jobs:
       - name: Verify maturity artifacts
         run: npm run check:maturity-artifacts
 
+      - name: Verify formal evidence traceability
+        run: npm run check:formal-evidence
+
       - name: Run security test suite
         run: npm run test:security
 

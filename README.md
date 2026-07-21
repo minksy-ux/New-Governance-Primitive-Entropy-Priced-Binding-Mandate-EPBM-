@@ -199,17 +199,27 @@ Security evidence templates:
 - `docs/security/SECURITY_REPORT_TEMPLATE.md`
 - `docs/security/remediation-log.csv`
 - `docs/security/FORMAL_INVARIANTS_SPEC.md`
+- `docs/security/formal-evidence-matrix.json`
 
 Operational drill runbooks:
 - `docs/operations/drills/capture-event-drill.md`
 - `docs/operations/drills/disputed-fork-drill.md`
 - `docs/operations/drills/verifier-compromise-drill.md`
+- `docs/operations/public-drill-program.md`
+- `docs/operations/drills/runs/WITNESS_ATTESTATION_TEMPLATE.md`
 
 Adversarial and invariant security tests:
 - `npm run test:security`
 
 Artifact completeness gate:
 - `npm run check:maturity-artifacts`
+
+Formal evidence traceability gate:
+- `npm run check:formal-evidence`
+
+Governance transparency exporters:
+- `npm run export:verifier-history -- --registry <registryAddress> --from-block <start>`
+- `npm run export:fork-legitimacy -- --epbm <epbmAddress> --mandate-id <id>`
 
 CI traceability artifacts (on push/PR):
 - drill run evidence bundle (`docs/operations/drills/runs/*.md`)
@@ -227,6 +237,7 @@ Primary stage guide:
 
 Governance and incident policy artifacts:
 - `docs/governance/verifier-admission-removal-constitution.md`
+- `docs/governance/fork-legitimacy-transparency-standard.md`
 - `docs/governance/dispute-process.md`
 - `docs/governance/incident-postmortem-template.md`
 - `docs/governance/parameter-policy.md`
@@ -241,11 +252,14 @@ Stress campaign tooling:
 	- `npm run test:security`
 2. Verify maturity artifact completeness:
 	- `npm run check:maturity-artifacts`
-3. Execute full regression suite:
+3. Verify formal evidence traceability:
+	- `npm run check:formal-evidence`
+4. Execute full regression suite:
 	- `npm test`
-4. Fill security report + remediation log from test and review outputs.
-5. Run and record all three operations drills with named owners and completion timestamps.
-6. Publish production governance policy bundle and stress-envelope outputs.
+5. Fill security report + remediation log from test and review outputs.
+6. Publish verifier governance history and fork-legitimacy packet exports.
+7. Run and record all three operations drills with external participants and witness attestations.
+8. Publish production governance policy bundle and stress-envelope outputs.
 
 ## Project Status
 
